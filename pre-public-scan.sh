@@ -50,10 +50,23 @@ else
   echo "  none"
 fi
 
+# 3) Commit author/committer email metadata -------------------------------
+# These live in commit headers, NOT in files — gitleaks and content greps miss
+# them. Public repos expose every author email. Want only GitHub no-reply.
+echo "--- commit author/committer emails ---"
+BADEMAIL="$(git log --all --format='%ae%n%ce' | sort -u | grep -viE 'users\.noreply\.github\.com$')"
+if [ -n "$BADEMAIL" ]; then
+  echo "  REVIEW — real emails in commit metadata (rewrite history before public):"
+  echo "$BADEMAIL" | sed 's/^/    /'
+  FAIL=1
+else
+  echo "  clean — all commits use a github no-reply address"
+fi
+
 echo "===== END: $NAME ====="
 if [ "$FAIL" -eq 0 ]; then
-  echo "RESULT: secrets CLEAN. Review the PII list above before going public."
+  echo "RESULT: secrets & author-email CLEAN. Review the PII list above before going public."
 else
-  echo "RESULT: ATTENTION NEEDED (secrets found or scanner missing)."
+  echo "RESULT: ATTENTION NEEDED (secrets, author email, or scanner missing)."
 fi
 exit "$FAIL"
