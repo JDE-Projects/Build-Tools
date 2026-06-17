@@ -1,0 +1,64 @@
+name: Build & Release (reusable)
+
+# Apps call this. It builds the exe on a clean GitHub runner, zips it,
+# hashes it, attaches GitHub-signed provenance, and waits for your
+# approval before publishing to the calling app's Releases page.
+
+on:
+  workflow_call:
+    inputs:
+      app_name:        { type: string, required: true }   # e.g. SimpleProjectManager
+      python_version:  { type: string, default: '3.14' }
+      dist_subfolder:  { type: string, default: '' }       # blank = same as app_name
+      build_command:   { type: string, default: '.\Build.bat' }
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      id-token: write          # required to sign provenance
+      attestations: write       # required to record it
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ inputs.python_version }}' }
+      - name: Install deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          pip install pyinstaller
+      - name: Build
+        shell: pwsh
+        run: ${{ inputs.build_command }}
+      - name: Pack + hash
+        id: pack
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          $sub = if ("${{ inputs.dist_subfolder }}") { "${{ inputs.dist_subfolder }}" } else { "${{ inputs.app_name }}" }
+          $zip = "${{ inputs.app_name }}-$ver.zip"
+          Compress-Archive -Path "dist\$sub\*" -DestinationPath $zip
+          (Get-FileHash $zip -Algorithm SHA256).Hash | Out-File "$zip.sha256"
+          "zip=$zip" | Out-File $env:GITHUB_OUTPUT -Append
+      - name: Attest provenance
+        uses: actions/attest-build-provenance@v1
+        with: { subject-path: '${{ steps.pack.outputs.zip }}' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: '${{ inputs.app_name }}-*'
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release         # the human approval gate (set up per-app, once)
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: release-files }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: '${{ inputs.app_name }}-*'
+          generate_release_notes: true

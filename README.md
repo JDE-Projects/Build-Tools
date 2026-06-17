@@ -1,0 +1,48 @@
+# Build-Tools
+
+Shared GitHub Actions recipe for JDE-Projects "Simple X Tools".
+
+It builds a Windows exe on a clean GitHub runner, zips it, publishes a
+SHA-256 checksum, attaches a GitHub-signed [build provenance attestation],
+and waits for maintainer approval before publishing the release. This lets
+anyone confirm a downloaded binary was built from public source — no need
+to trust the maintainer's laptop.
+
+## How an app uses it
+
+Add `.github/workflows/release.yml` to the app repo:
+
+```yaml
+name: Release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  release:
+    uses: JDE-Projects/Build-Tools/.github/workflows/release.yml@v1
+    permissions:
+      id-token: write
+      attestations: write
+      contents: write
+    with:
+      app_name: YourAppName
+```
+
+Then: push a `v*` tag &rarr; it builds &rarr; approve the release in GitHub &rarr; published.
+
+### Inputs
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `app_name` | yes | — | Used for the zip name and default dist folder |
+| `python_version` | no | `3.12` | Match the app's pinned Python |
+| `dist_subfolder` | no | `app_name` | PyInstaller `--onedir` output folder under `dist\` |
+| `build_command` | no | `.\Build.bat` | The app's build script |
+
+## Verifying a download
+
+```
+gh attestation verify YourAppName-v1.0.0.zip --repo JDE-Projects/YourAppName
+```
+
+[build provenance attestation]: https://docs.github.com/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds
