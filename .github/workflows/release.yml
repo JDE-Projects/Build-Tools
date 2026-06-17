@@ -10,7 +10,7 @@ on:
       app_name:        { type: string, required: true }   # e.g. SimpleProjectManager
       python_version:  { type: string, default: '3.14' }
       dist_subfolder:  { type: string, default: '' }       # blank = same as app_name
-      build_command:   { type: string, default: '.\Build.bat' }
+      build_command:   { type: string, default: 'Build.bat' }
 
 jobs:
   build:
@@ -30,7 +30,7 @@ jobs:
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
           pip install pyinstaller
       - name: Build
-        shell: pwsh
+        shell: cmd
         run: ${{ inputs.build_command }}
       - name: Pack + hash
         id: pack
