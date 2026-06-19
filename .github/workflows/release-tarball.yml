@@ -1,0 +1,54 @@
+name: Release tarball (reusable)
+
+# Source-distributed apps (Linux / Raspberry Pi, installed from source) call this.
+# It packages the tagged source into a deterministic tar.gz on a clean GitHub
+# runner, hashes it, attaches GitHub-signed provenance, and waits for your
+# approval before publishing to the calling app's Releases page. There is no
+# build step — the artifact is the source at the tag, not a compiled binary.
+
+on:
+  workflow_call:
+    inputs:
+      app_name: { type: string, required: true }   # e.g. simple-network-dashboard
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write          # required to sign provenance
+      attestations: write       # required to record it
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Pack + hash
+        id: pack
+        run: |
+          ver="${{ github.ref_name }}"
+          name="${{ inputs.app_name }}"
+          tar="${name}-${ver}.tar.gz"
+          # Deterministic archive of tracked files at the tag, extracted under a
+          # clean prefixed folder. HEAD is the tag commit checkout landed on.
+          git archive --format=tar.gz --prefix="${name}-${ver}/" -o "$tar" HEAD
+          # Full sha256sum output so users can verify with: sha256sum -c "$tar.sha256"
+          sha256sum "$tar" > "$tar.sha256"
+          echo "tar=$tar" >> "$GITHUB_OUTPUT"
+      - name: Attest provenance
+        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
+        with: { subject-path: '${{ steps.pack.outputs.tar }}' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-files
+          path: '${{ inputs.app_name }}-*'
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release         # the human approval gate (set up per-app, once)
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: release-files }
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: '${{ inputs.app_name }}-*'
+          generate_release_notes: true
