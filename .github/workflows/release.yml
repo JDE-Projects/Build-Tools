@@ -1,8 +1,9 @@
 name: Build & Release (reusable)
 
-# Apps call this. It builds the exe on a clean GitHub runner, zips it,
-# hashes it, attaches GitHub-signed provenance, and waits for your
-# approval before publishing to the calling app's Releases page.
+# Apps call this. It builds the exe on a clean GitHub runner, makes a Windows
+# installer and a portable zip, hashes them, attaches GitHub-signed provenance
+# over both, and waits for your approval before publishing to the calling app's
+# Releases page.
 
 on:
   workflow_call:
@@ -11,6 +12,8 @@ on:
       python_version:  { type: string, default: '3.14' }
       dist_subfolder:  { type: string, default: '' }       # blank = same as app_name
       build_command:   { type: string, default: 'Build.bat' }
+      build_installer: { type: boolean, default: true }    # also build an Inno Setup installer
+      app_id:          { type: string, default: '' }       # stable GUID for the installer's AppId (required when build_installer)
 
 jobs:
   build:
@@ -32,6 +35,60 @@ jobs:
       - name: Build
         shell: cmd
         run: ${{ inputs.build_command }}
+
+      - name: Get installer template
+        if: ${{ inputs.build_installer }}
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ github.repository_owner }}/Build-Tools
+          ref: ${{ github.job_workflow_sha }}
+          path: _buildtools
+      - name: Install Inno Setup
+        if: ${{ inputs.build_installer }}
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+      - name: Build installer
+        id: installer
+        if: ${{ inputs.build_installer }}
+        shell: pwsh
+        run: |
+          $ver  = "${{ github.ref_name }}"
+          $sub  = if ("${{ inputs.dist_subfolder }}") { "${{ inputs.dist_subfolder }}" } else { "${{ inputs.app_name }}" }
+          $disp = $sub
+          $exe  = "$sub.exe"
+          $repo = "https://github.com/${{ github.repository }}"
+          $out  = "${{ inputs.app_name }}-$ver-setup"
+
+          # Build README.txt from the shared template + this app's usage.txt
+          $tmpl  = Get-Content "_buildtools/installer/README.txt.template" -Raw
+          $usage = if (Test-Path "installer/usage.txt") { (Get-Content "installer/usage.txt" -Raw).Trim() } else { "" }
+          $readme = $tmpl.
+            Replace("{{APP_NAME}}",   $disp).
+            Replace("{{VERSION}}",    $ver).
+            Replace("{{REPO_URL}}",   $repo).
+            Replace("{{ISSUES_URL}}", "$repo/issues").
+            Replace("{{USAGE}}",      $usage)
+          Set-Content -Path "README.txt" -Value $readme -Encoding UTF8
+
+          # Compile the installer
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc `
+            "/DMySrcRoot=$env:GITHUB_WORKSPACE" `
+            "/DMyAppName=$disp" `
+            "/DMyAppVersion=$ver" `
+            "/DMyExeName=$exe" `
+            "/DMySourceDir=dist\$sub" `
+            "/DMyAppId=${{ inputs.app_id }}" `
+            "/DMyRepo=$repo" `
+            "/DMyIssues=$repo/issues" `
+            "/DMyOutput=$out" `
+            "_buildtools/installer/installer.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+          $setup = "$out.exe"
+          (Get-FileHash $setup -Algorithm SHA256).Hash | Out-File "$setup.sha256"
+          "exe=$setup" | Out-File $env:GITHUB_OUTPUT -Append
+
       - name: Pack + hash
         id: pack
         shell: pwsh
@@ -44,7 +101,10 @@ jobs:
           "zip=$zip" | Out-File $env:GITHUB_OUTPUT -Append
       - name: Attest provenance
         uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
-        with: { subject-path: '${{ steps.pack.outputs.zip }}' }
+        with:
+          subject-path: |
+            ${{ steps.pack.outputs.zip }}
+            ${{ steps.installer.outputs.exe }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-files

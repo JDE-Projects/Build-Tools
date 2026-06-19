@@ -1,0 +1,18 @@
+{{APP_NAME}} {{VERSION}}
+A JDE-Projects tool.
+
+{{USAGE}}
+
+----------------------------------------------------------------
+Support and reporting problems
+  Project page:  {{REPO_URL}}
+  Bug or request? Open an issue:  {{ISSUES_URL}}
+  If this tool is useful to you, you can buy me a coffee:
+    https://ko-fi.com/jdeprojects   (optional, always appreciated)
+
+License
+  Released under the PolyForm Noncommercial License 1.0.0. Personal and any
+  noncommercial use is permitted; commercial use is not. See the LICENSE file
+  in this folder. This tool bundles third-party code; see
+  THIRD-PARTY-LICENSES.txt.
+----------------------------------------------------------------
