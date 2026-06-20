@@ -40,7 +40,7 @@ WizardStyle=modern
 ; SignedUninstaller=yes
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+Name: "desktopicon"; Description: "Create a desktop shortcut"
 
 [Files]
 Source: "{#MySourceDir}\*";          DestDir: "{app}"; Flags: recursesubdirs ignoreversion
@@ -56,3 +56,25 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "{app}\{#MyExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+{ The app writes its runtime files (config, keys, logs, any data folders) next
+  to the exe, so Inno's uninstaller leaves them behind. After the normal
+  uninstall, offer to remove anything still in the install folder. }
+procedure CurUninstallStepChanged(CurStep: TUninstallStep);
+var
+  AppDir: string;
+begin
+  if CurStep = usPostUninstall then
+  begin
+    AppDir := ExpandConstant('{app}');
+    if DirExists(AppDir) then
+    begin
+      if MsgBox('Also remove all settings and data {#MyAppName} created in its'
+                + #13#10 + 'install folder (configuration, keys, logs, and any'
+                + ' files it saved there)?',
+                mbConfirmation, MB_YESNO) = IDYES then
+        DelTree(AppDir, True, True, True);
+    end;
+  end;
+end;
