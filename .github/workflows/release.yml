@@ -40,8 +40,8 @@ jobs:
         if: ${{ inputs.build_installer }}
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: ${{ github.repository_owner }}/Build-Tools
-          ref: ${{ github.job_workflow_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: _buildtools
       - name: Install Inno Setup
         if: ${{ inputs.build_installer }}
