@@ -60,21 +60,42 @@ Filename: "{app}\{#MyExeName}"; Description: "Launch {#MyAppName}"; Flags: nowai
 [Code]
 { The app writes its runtime files (config, keys, logs, any data folders) next
   to the exe, so Inno's uninstaller leaves them behind. After the normal
-  uninstall, offer to remove anything still in the install folder. }
+  uninstall, offer to remove anything still in the install folder.
+
+  We delete every leftover EXCEPT the uninstaller's own files (unins*), which are
+  locked because the uninstaller is still running from this folder. Inno self-
+  deletes those and the now-empty folder on exit, so the whole folder ends up
+  gone without a "could not be removed" warning. }
 procedure CurUninstallStepChanged(CurStep: TUninstallStep);
 var
-  AppDir: string;
+  AppDir, Item: string;
+  FindRec: TFindRec;
 begin
-  if CurStep = usPostUninstall then
-  begin
-    AppDir := ExpandConstant('{app}');
-    if DirExists(AppDir) then
-    begin
-      if MsgBox('Also remove all settings and data {#MyAppName} created in its'
-                + #13#10 + 'install folder (configuration, keys, logs, and any'
-                + ' files it saved there)?',
-                mbConfirmation, MB_YESNO) = IDYES then
-        DelTree(AppDir, True, True, True);
-    end;
+  if CurStep <> usPostUninstall then
+    exit;
+  AppDir := ExpandConstant('{app}');
+  if not DirExists(AppDir) then
+    exit;
+  if MsgBox('Also remove all settings and data {#MyAppName} created in its'
+            + #13#10 + 'install folder (configuration, keys, logs, and any'
+            + ' files it saved there)?',
+            mbConfirmation, MB_YESNO) <> IDYES then
+    exit;
+
+  if FindFirst(AppDir + '\*', FindRec) then
+  try
+    repeat
+      if (FindRec.Name = '.') or (FindRec.Name = '..') then
+        continue;
+      if CompareText(Copy(FindRec.Name, 1, 5), 'unins') = 0 then
+        continue;                              { leave the running uninstaller }
+      Item := AppDir + '\' + FindRec.Name;
+      if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+        DelTree(Item, True, True, True)
+      else
+        DeleteFile(Item);
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
   end;
 end;
