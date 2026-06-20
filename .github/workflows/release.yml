@@ -46,7 +46,7 @@ jobs:
       - name: Install Inno Setup
         if: ${{ inputs.build_installer }}
         shell: pwsh
-        run: choco install innosetup --no-progress -y
+        run: choco install innosetup --version=6.7.1 --no-progress -y   # pin per supply-chain standard
       - name: Build installer
         id: installer
         if: ${{ inputs.build_installer }}
