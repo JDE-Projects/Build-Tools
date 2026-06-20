@@ -62,10 +62,13 @@ Filename: "{app}\{#MyExeName}"; Description: "Launch {#MyAppName}"; Flags: nowai
   to the exe, so Inno's uninstaller leaves them behind. After the normal
   uninstall, offer to remove anything still in the install folder.
 
-  We delete every leftover EXCEPT the uninstaller's own files (unins*), which are
-  locked because the uninstaller is still running from this folder. Inno self-
-  deletes those and the now-empty folder on exit, so the whole folder ends up
-  gone without a "could not be removed" warning. }
+  We delete every leftover EXCEPT the uninstaller's own files (unins*). By this
+  step Inno has already removed its own files (it runs from a temp copy) and has
+  already ATTEMPTED to remove the install folder -- but that attempt ran before
+  this code and failed because our leftovers were still present, and Inno does
+  not retry. So once we have emptied the folder we remove it ourselves. RemoveDir
+  only deletes an EMPTY directory, so if the user keeps their data (or anything
+  else remains) both the data and the folder stay put. }
 procedure CurUninstallStepChanged(CurStep: TUninstallStep);
 var
   AppDir, Item: string;
@@ -98,4 +101,8 @@ begin
   finally
     FindClose(FindRec);
   end;
+
+  { Now that the leftovers are gone, remove the empty install folder that Inno
+    left behind (see note above). No-op if anything still remains. }
+  RemoveDir(AppDir);
 end;
