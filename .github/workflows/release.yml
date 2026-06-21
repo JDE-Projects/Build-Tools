@@ -37,6 +37,8 @@ jobs:
         run: ${{ inputs.build_command }}
 
       - name: Get installer template
+        # Pin the template to this workflow's exact version. Use job.workflow_sha
+        # (github.job_workflow_sha is not a real context and silently resolves to empty).
         if: ${{ inputs.build_installer }}
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
