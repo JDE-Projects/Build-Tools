@@ -33,7 +33,7 @@ jobs:
           sha256sum "$tar" > "$tar.sha256"
           echo "tar=$tar" >> "$GITHUB_OUTPUT"
       - name: Attest provenance
-        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with: { subject-path: '${{ steps.pack.outputs.tar }}' }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -102,7 +102,7 @@ jobs:
           (Get-FileHash $zip -Algorithm SHA256).Hash | Out-File "$zip.sha256"
           "zip=$zip" | Out-File $env:GITHUB_OUTPUT -Append
       - name: Attest provenance
-        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: |
             ${{ steps.pack.outputs.zip }}
