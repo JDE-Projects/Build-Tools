@@ -29,7 +29,7 @@ jobs:
       app_name: YourAppName
 ```
 
-Then: push a `v*` tag &rarr; it builds &rarr; approve the release in GitHub &rarr; published.
+Then: push a `v*` tag &rarr; it builds &rarr; approve the release in GitHub &rarr; published &rarr; replace the auto-generated notes with a concise `## What's Changed` (`gh release edit`).
 
 ### Inputs
 
