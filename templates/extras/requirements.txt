@@ -1,0 +1,23 @@
+# Vetted per-app extras menu for JDE-Projects Simple X Tools.
+# This file is NOT installed wholesale. When a new tool needs one of these,
+# copy the exact lines it imports into that tool's own requirements.txt.
+# Dependabot (see ../../.github/dependabot.yml) bumps these pins here so the
+# menu a new tool copies from stays current, and so the shipped crypto stays
+# patched. Do not hand-pin these from a local pip install.
+# Proven against the fleet's green CI builds (Python 3.14).
+
+# SSH/SFTP transport (paramiko) and its bundled crypto deps. cryptography is
+# also used directly for Ed25519 key generation in some tools.
+paramiko==5.0.0
+cryptography==49.0.0
+bcrypt==5.0.0
+PyNaCl==1.6.2
+
+# Optional "remember password" via the OS keychain (Windows Credential Manager).
+keyring==25.7.0
+
+# NOTE: ssh-audit is deliberately NOT listed here. It is pinned from a GitHub
+# commit (the PyPI release is stale), which Dependabot cannot auto-update, and
+# each bump needs a manual review of upstream diffs for anything malicious or
+# breaking. A tool that needs it copies the pinned git+https line from an
+# existing audit tool and follows that repo's "Keeping ssh-audit current" notes.
