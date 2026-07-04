@@ -1,9 +1,23 @@
-# Dependabot keeps the SHA-pinned Actions in release.yml up to date.
-# It opens a PR (which you review) when a newer release of an action exists,
-# updating both the pinned SHA and its version comment.
+# Dependabot keeps this repo's pinned dependencies up to date. It opens a PR
+# (which you review) when a newer release exists.
+#  - github-actions: the SHA-pinned actions in the reusable release workflows,
+#    updating both the pinned SHA and its version comment.
+#  - pip (templates/base, templates/extras): the canonical version pins a new
+#    Simple X Tool copies at scaffold time, kept current here so new tools are
+#    never born on stale pins.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: /templates/base
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: /templates/extras
     schedule:
       interval: weekly

@@ -1,0 +1,12 @@
+# Canonical baseline build dependencies for every JDE-Projects Simple X Tool.
+# This file is the single source of truth. When scaffolding a new tool, copy
+# these lines verbatim into the tool's own requirements.txt, then append any
+# per-app extras it imports (see ../extras/requirements.txt).
+# Dependabot (see ../../.github/dependabot.yml) bumps these pins here whenever a
+# newer release lands, so the baseline a new tool copies is always current.
+# Do not hand-pin these from a local pip install or copy them from another tool.
+# Proven against the JDE pilot's green CI build (Python 3.14).
+pywebview==6.2.1
+PySide6==6.11.1
+qtpy==2.4.3
+pyinstaller==6.21.0
