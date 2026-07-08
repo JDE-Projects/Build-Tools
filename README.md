@@ -6,8 +6,8 @@ It builds a Windows exe on a clean GitHub runner, packages it as both a
 portable zip and a Windows installer, publishes SHA-256 checksums, attaches
 a GitHub-signed [build provenance attestation] over both files, and waits
 for maintainer approval before publishing the release. This lets anyone
-confirm a downloaded binary was built from public source — no need to trust
-the maintainer's laptop.
+confirm a downloaded binary was built from public source, with no need to
+trust the maintainer's laptop.
 
 ## How an app uses it
 
@@ -35,12 +35,12 @@ Then: push a `v*` tag &rarr; it builds &rarr; approve the release in GitHub &rar
 
 | Input | Required | Default | Notes |
 |---|---|---|---|
-| `app_name` | yes | — | Used for the zip name and default dist folder |
+| `app_name` | yes | (none) | Used for the zip name and default dist folder |
 | `python_version` | no | `3.14` | Match the app's pinned Python |
 | `dist_subfolder` | no | `app_name` | PyInstaller `--onedir` output folder under `dist\` |
 | `build_command` | no | `Build.bat` | The app's build script (runs in `cmd`) |
 | `build_installer` | no | `true` | Also build a Windows installer (`<app_name>-<tag>-setup.exe`) via Inno Setup |
-| `app_id` | when `build_installer` | — | Stable GUID used as the installer's AppId (generate one per app, never change it) |
+| `app_id` | when `build_installer` | (none) | Stable GUID used as the installer's AppId (generate one per app, never change it) |
 
 ## Verifying a download
 
@@ -54,7 +54,7 @@ gh attestation verify YourAppName-v1.0.0.zip \
   --signer-repo JDE-Projects/Build-Tools
 ```
 
-The same command works for the installer — just substitute the `-setup.exe`:
+The same command works for the installer, just substitute the `-setup.exe`:
 
 ```
 gh attestation verify YourAppName-v1.0.0-setup.exe \
@@ -63,6 +63,6 @@ gh attestation verify YourAppName-v1.0.0-setup.exe \
 ```
 
 A `Verification succeeded!` line means the file was built by this pipeline from
-the named public source — nothing else.
+the named public source, nothing else.
 
 [build provenance attestation]: https://docs.github.com/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds
