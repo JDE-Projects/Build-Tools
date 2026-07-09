@@ -53,6 +53,29 @@ content greps miss it (it must be a GitHub no-reply address, not a real address)
 A skipped gitleaks run counts as a FAIL, not a pass, so confirm the scan actually
 ran. No scan is 100%; showing what was checked is part of the deal.
 
+## Post-public security settings (after flipping any repo public)
+
+Secret scanning and code scanning are free on public repos only, so they cannot
+be enabled while the repo is private. Immediately after flipping a repo public,
+run both (verified working July 2026):
+
+```bash
+gh api -X PATCH "repos/JDE-Projects/<repo>" \
+  -f "security_and_analysis[secret_scanning][status]=enabled" \
+  -f "security_and_analysis[secret_scanning_push_protection][status]=enabled"
+
+gh api -X PATCH "repos/JDE-Projects/<repo>/code-scanning/default-setup" \
+  -f state=configured
+```
+
+No leading slash on the endpoint: Git Bash rewrites "/repos/..." into a
+Windows filesystem path and the call fails.
+
+Everything else is already covered automatically: account settings enable
+Dependabot, dependency graph, and private vulnerability reporting on new repos,
+account-level "push protection for yourself" is on, and the default SECURITY.md
+in the .github repo applies to every repo without its own.
+
 ## Constraints
 
 - Provenance attestation and the required-reviewer gate are public-repo-only on
