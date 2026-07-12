@@ -5,11 +5,15 @@ name: Release tarball (reusable)
 # runner, hashes it, attaches GitHub-signed provenance, and waits for your
 # approval before publishing to the calling app's Releases page. There is no
 # build step — the artifact is the source at the tag, not a compiled binary.
+# Before packing it runs the same CI sanity checks as release.yml: ruff lint,
+# an import of entry_script (if set), and pytest on tests/ (if present).
 
 on:
   workflow_call:
     inputs:
-      app_name: { type: string, required: true }   # e.g. simple-network-dashboard
+      app_name:       { type: string, required: true }   # e.g. simple-network-dashboard
+      python_version: { type: string, default: '3.11' }  # match the deployment target (Raspberry Pi OS Bookworm ships 3.11)
+      entry_script:   { type: string, default: '' }      # app's main .py (e.g. main.py); enables the CI import check when set
 
 jobs:
   build:
@@ -20,6 +24,27 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with: { python-version: '${{ inputs.python_version }}' }
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Lint (ruff)
+        run: |
+          pip install ruff==0.15.21   # pin per supply-chain standard
+          ruff check .
+      - name: Import check
+        if: ${{ inputs.entry_script != '' }}
+        run: python -c "import $(basename '${{ inputs.entry_script }}' .py)"
+      - name: Run tests
+        run: |
+          if [ -d tests ]; then
+            pip install pytest==8.4.2   # pin per supply-chain standard
+            python -m pytest tests -q
+          else
+            echo "No tests folder; skipping pytest."
+          fi
       - name: Pack + hash
         id: pack
         run: |
