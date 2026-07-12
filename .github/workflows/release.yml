@@ -14,6 +14,7 @@ on:
       build_command:   { type: string, default: 'Build.bat' }
       build_installer: { type: boolean, default: true }    # also build an Inno Setup installer
       app_id:          { type: string, default: '' }       # stable GUID for the installer's AppId (required when build_installer)
+      entry_script:    { type: string, default: '' }       # tool's main .py (e.g. simple_ssh_tool.py); enables the CI import check when set
 
 jobs:
   build:
@@ -32,6 +33,29 @@ jobs:
           python -m pip install --upgrade pip
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
           pip install pyinstaller
+      - name: Lint (ruff)
+        shell: pwsh
+        run: |
+          pip install ruff==0.15.21   # pin per supply-chain standard
+          ruff check .
+          if ($LASTEXITCODE -ne 0) { throw "ruff check failed" }
+      - name: Import check
+        if: ${{ inputs.entry_script != '' }}
+        shell: pwsh
+        run: |
+          $mod = [System.IO.Path]::GetFileNameWithoutExtension("${{ inputs.entry_script }}")
+          python -c "import $mod"
+          if ($LASTEXITCODE -ne 0) { throw "Import check failed for $mod" }
+      - name: Run tests
+        shell: pwsh
+        run: |
+          if (Test-Path tests) {
+            pip install pytest==8.4.2   # pin per supply-chain standard
+            python -m pytest tests -q
+            if ($LASTEXITCODE -ne 0) { throw "pytest failed" }
+          } else {
+            Write-Host "No tests folder; skipping pytest."
+          }
       - name: Build
         shell: cmd
         run: ${{ inputs.build_command }}

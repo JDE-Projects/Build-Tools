@@ -41,6 +41,12 @@ Then: push a `v*` tag &rarr; it builds &rarr; approve the release in GitHub &rar
 | `build_command` | no | `Build.bat` | The app's build script (runs in `cmd`) |
 | `build_installer` | no | `true` | Also build a Windows installer (`<app_name>-<tag>-setup.exe`) via Inno Setup |
 | `app_id` | when `build_installer` | (none) | Stable GUID used as the installer's AppId (generate one per app, never change it) |
+| `entry_script` | no | (none) | Tool's main `.py` filename (e.g. `simple_ssh_tool.py`); when set, CI imports the module before building to catch syntax/import/dependency breakage |
+
+Before the build step, the workflow also runs three CI sanity checks, in order:
+it lints the whole repo with `ruff` (default rules), it imports `entry_script`
+(if set), and if the repo has a `tests/` folder, it runs that folder with
+`pytest`.
 
 ## Verifying a download
 
