@@ -37,7 +37,7 @@ jobs:
         shell: pwsh
         run: |
           pip install ruff==0.15.21   # pin per supply-chain standard
-          ruff check .
+          ruff check . --select E4,E7,E9,F,B
           if ($LASTEXITCODE -ne 0) { throw "ruff check failed" }
       - name: Import check
         if: ${{ inputs.entry_script != '' }}

@@ -33,7 +33,7 @@ jobs:
       - name: Lint (ruff)
         run: |
           pip install ruff==0.15.21   # pin per supply-chain standard
-          ruff check .
+          ruff check . --select E4,E7,E9,F,B
       - name: Import check
         if: ${{ inputs.entry_script != '' }}
         run: python -c "import $(basename '${{ inputs.entry_script }}' .py)"
