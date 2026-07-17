@@ -77,3 +77,4 @@ jobs:
         with:
           files: '${{ inputs.app_name }}-*'
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}   # rc/beta tags never become "Latest"
