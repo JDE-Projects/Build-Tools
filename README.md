@@ -44,9 +44,12 @@ Then: push a `v*` tag &rarr; it builds &rarr; approve the release in GitHub &rar
 | `entry_script` | no | (none) | Tool's main `.py` filename (e.g. `simple_ssh_tool.py`); when set, CI imports the module before building to catch syntax/import/dependency breakage |
 
 Before the build step, the workflow also runs three CI sanity checks, in order:
-it lints the whole repo with `ruff` (default rules), it imports `entry_script`
+it lints the whole repo with `ruff` using an explicit rule set
+(`--select E4,E7,E9,F,B`, not ruff's defaults), it imports `entry_script`
 (if set), and if the repo has a `tests/` folder, it runs that folder with
-`pytest`.
+`pytest`. The exact select and the pinned ruff version are defined in this
+repo's `.github/workflows/release.yml` (and `release-tarball.yml`), the source
+of truth for both.
 
 ## Verifying a download
 
