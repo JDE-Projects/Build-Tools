@@ -5,5 +5,5 @@
 # Dependabot (see ../../.github/dependabot.yml) bumps these pins here. Tool repos
 # do not bump them independently; they pick up the change when they refresh their
 # copy.
-ruff==0.15.21
-pytest==8.4.2
+ruff==0.15.22
+pytest==9.1.1
