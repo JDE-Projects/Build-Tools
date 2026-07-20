@@ -36,7 +36,7 @@ jobs:
       - name: Lint (ruff)
         shell: pwsh
         run: |
-          pip install ruff==0.15.21   # pin per supply-chain standard
+          pip install ruff==0.15.22   # pin per supply-chain standard
           ruff check . --select E4,E7,E9,F,B
           if ($LASTEXITCODE -ne 0) { throw "ruff check failed" }
       - name: Import check
@@ -50,7 +50,7 @@ jobs:
         shell: pwsh
         run: |
           if (Test-Path tests) {
-            pip install pytest==8.4.2   # pin per supply-chain standard
+            pip install pytest==9.1.1   # pin per supply-chain standard
             python -m pytest tests -q
             if ($LASTEXITCODE -ne 0) { throw "pytest failed" }
           } else {
