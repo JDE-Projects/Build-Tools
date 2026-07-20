@@ -29,6 +29,9 @@ Signing facts worth not re-researching:
    build first).
 3. Pin the caller's `uses:` to a Build-Tools commit SHA, not @v1 or @main.
 4. Enable Dependabot so pinned refs still get reviewed update PRs.
+5. CI and dev tooling versions (ruff, pytest) live in `templates/dev/requirements.txt`,
+   not inline in workflow `run:` blocks, because Dependabot can't see a version
+   string inside a shell command.
 
 ## Dependabot PR review protocol
 
