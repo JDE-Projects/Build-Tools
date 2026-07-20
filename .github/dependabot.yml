@@ -5,6 +5,9 @@
 #  - pip (templates/base, templates/extras): the canonical version pins a new
 #    Simple X Tool copies at scaffold time, kept current here so new tools are
 #    never born on stale pins.
+#  - pip (templates/dev): the ruff/pytest tooling pins the reusable workflows
+#    install for CI, and that tool repos copy as requirements-dev.txt so local
+#    checks match CI.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -19,5 +22,10 @@ updates:
 
   - package-ecosystem: pip
     directory: /templates/extras
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: /templates/dev
     schedule:
       interval: weekly
