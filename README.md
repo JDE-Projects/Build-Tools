@@ -47,9 +47,11 @@ Before the build step, the workflow also runs three CI sanity checks, in order:
 it lints the whole repo with `ruff` using an explicit rule set
 (`--select E4,E7,E9,F,B`, not ruff's defaults), it imports `entry_script`
 (if set), and if the repo has a `tests/` folder, it runs that folder with
-`pytest`. The ruff and pytest versions come from `templates/dev/requirements.txt`,
-which the workflows install and which Dependabot keeps current; tool repos copy
-it as `requirements-dev.txt` so local checks match CI.
+`pytest`. The select flags are defined in this repo's
+`.github/workflows/release.yml` (and `release-tarball.yml`). The ruff and pytest
+versions come from `templates/dev/requirements.txt`, which the workflows install
+and which Dependabot keeps current; tool repos copy it as `requirements-dev.txt`
+so local checks match CI.
 
 ## Verifying a download
 
