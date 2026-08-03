@@ -1,0 +1,69 @@
+name: CI Windows (reusable)
+
+# Desktop tools (pywebview + PySide6, shipped as a Windows exe) call this on
+# pull requests and pushes to main. It runs the same sanity checks release.yml
+# runs, on the same OS and Python version release.yml builds with, so a bad
+# dependency bump or a broken import fails on the PR instead of surfacing
+# mid-release.
+#
+# Windows, not Linux, is the point: these tools import pywebview and PySide6,
+# which resolve differently per platform. Checking them on ubuntu would test a
+# platform the fleet does not ship on.
+#
+# There is no build step here: no exe, no installer, no signing, no publishing.
+# PyInstaller is not installed, since nothing is packaged.
+
+on:
+  workflow_call:
+    inputs:
+      python_version: { type: string, default: '3.14' }  # match release.yml's default
+      entry_script:   { type: string, default: '' }      # tool's main .py (e.g. simple_ssh_tool.py); enables the import check when set
+
+jobs:
+  check:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '${{ inputs.python_version }}' }
+      - name: Get Build-Tools templates
+        # Version-matches the dev tooling pins (ruff, pytest) to this workflow's
+        # exact version. Use job.workflow_sha (github.job_workflow_sha is not a
+        # real context and silently resolves to empty).
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _buildtools
+      - name: Install deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          pip install -r _buildtools/templates/dev/requirements.txt
+      - name: Lint (ruff)
+        shell: pwsh
+        run: |
+          # --exclude _buildtools: that folder is this workflow's own checkout,
+          # not the caller's code. Linting it would fail a tool's PR for a
+          # problem in Build-Tools.
+          ruff check . --select E4,E7,E9,F,B --exclude _buildtools
+          if ($LASTEXITCODE -ne 0) { throw "ruff check failed" }
+      - name: Import check
+        if: ${{ inputs.entry_script != '' }}
+        shell: pwsh
+        run: |
+          $mod = [System.IO.Path]::GetFileNameWithoutExtension("${{ inputs.entry_script }}")
+          python -c "import $mod"
+          if ($LASTEXITCODE -ne 0) { throw "Import check failed for $mod" }
+      - name: Run tests
+        shell: pwsh
+        run: |
+          if (Test-Path tests) {
+            python -m pytest tests -q
+            if ($LASTEXITCODE -ne 0) { throw "pytest failed" }
+          } else {
+            Write-Host "No tests folder; skipping pytest."
+          }

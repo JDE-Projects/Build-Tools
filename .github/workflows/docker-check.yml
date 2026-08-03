@@ -1,0 +1,60 @@
+name: Docker check (reusable)
+
+# Server tools that ship a Dockerfile call this on pull requests touching the
+# image or its dependencies. It builds the image and waits for the container's
+# own HEALTHCHECK to report healthy, so a broken base image or an incompatible
+# dependency fails on the PR instead of on the Pi. Nothing is pushed to a
+# registry and no credentials are used.
+#
+# Requires the Dockerfile to declare a HEALTHCHECK: that instruction is what
+# this workflow reads to decide pass or fail.
+
+on:
+  workflow_call:
+    inputs:
+      startup_timeout: { type: number, default: 90 }   # seconds to wait for HEALTHCHECK to report healthy
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build image
+        run: docker build -t ci-image:pr .
+      - name: Start container
+        run: docker run -d --name ci-check ci-image:pr
+      - name: Wait for healthy
+        run: |
+          # The image's own HEALTHCHECK is the source of truth. Poll the status
+          # Docker derives from it rather than reimplementing the probe here.
+          timeout='${{ inputs.startup_timeout }}'
+          deadline=$(( SECONDS + timeout ))
+          status=unknown
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ci-check 2>/dev/null || echo missing)
+            case "$status" in
+              healthy)
+                echo "Container reported healthy."
+                exit 0 ;;
+              unhealthy)
+                echo "::error::Container reported unhealthy."
+                exit 1 ;;
+              none)
+                echo "::error::Image declares no HEALTHCHECK, so this check cannot verify it."
+                exit 1 ;;
+              missing)
+                echo "::error::Container is not running."
+                exit 1 ;;
+            esac
+            sleep 3
+          done
+          echo "::error::Container did not become healthy within ${timeout}s (last status: ${status})."
+          exit 1
+      - name: Container logs
+        if: always()
+        run: docker logs ci-check || true
+      - name: Clean up
+        if: always()
+        run: docker rm -f ci-check || true
