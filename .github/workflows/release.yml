@@ -40,8 +40,10 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
+          # PyInstaller comes from the caller's own requirements.txt, pinned
+          # there from templates/base/requirements.txt. Installing it loose here
+          # would let an unpinned repo build against whatever is newest that day.
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
-          pip install pyinstaller
           pip install -r _buildtools/templates/dev/requirements.txt
       - name: Lint (ruff)
         shell: pwsh
