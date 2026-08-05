@@ -1,6 +1,14 @@
 # Build-Tools
 
-Shared GitHub Actions recipe for JDE-Projects "Simple X Tools".
+Shared build and release machinery for JDE-Projects "Simple X Tools":
+
+- the GitHub Actions release recipe, described below
+- [`screenshot/`](screenshot/), a pair of scripts that regenerate a repo's
+  README screenshot by command instead of by hand
+
+## Release recipe
+
+A shared GitHub Actions workflow.
 
 It builds a Windows exe on a clean GitHub runner, packages it as both a
 portable zip and a Windows installer, publishes SHA-256 checksums, attaches
