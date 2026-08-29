@@ -126,6 +126,14 @@ jobs:
           $ver = "${{ github.ref_name }}"
           $sub = if ("${{ inputs.dist_subfolder }}") { "${{ inputs.dist_subfolder }}" } else { "${{ inputs.app_name }}" }
           $zip = "${{ inputs.app_name }}-$ver.zip"
+          # Copy the repo's license and notice docs into the portable folder so
+          # the zip ships them. Required for LGPL/GPL compliance: the Qt tools
+          # bundle Qt through PySide6, and conveying those binaries without their
+          # license text and notices is a violation. Only files that exist are
+          # copied, so non-Qt tools simply carry fewer.
+          foreach ($doc in @("README.md","LICENSE","LICENSE.txt","THIRD-PARTY-LICENSES.txt","LICENSE.LGPL-3.0.txt","LICENSE.GPL-3.0.txt")) {
+            if (Test-Path $doc) { Copy-Item $doc "dist\$sub\" -Force }
+          }
           Compress-Archive -Path "dist\$sub\*" -DestinationPath $zip
           (Get-FileHash $zip -Algorithm SHA256).Hash | Out-File "$zip.sha256"
           "zip=$zip" | Out-File $env:GITHUB_OUTPUT -Append
