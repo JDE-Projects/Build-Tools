@@ -48,6 +48,8 @@ Source: "README.txt";                DestDir: "{app}"; Flags: ignoreversion isre
 Source: "LICENSE";                   DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "LICENSE.txt";               DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "THIRD-PARTY-LICENSES.txt";  DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "LICENSE.LGPL-3.0.txt";      DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "LICENSE.GPL-3.0.txt";       DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#MyAppName}";           Filename: "{app}\{#MyExeName}"
