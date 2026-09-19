@@ -1,3 +1,7 @@
 # Local planning notes (kept private, not shared)
 roadmap.md
 status.md
+
+# Python bytecode cache from running the check tests locally
+__pycache__/
+*.pyc

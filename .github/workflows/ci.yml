@@ -9,8 +9,12 @@ name: CI (reusable)
 on:
   workflow_call:
     inputs:
-      python_version: { type: string, default: '3.11' }  # match the deployment target (Raspberry Pi OS Bookworm ships 3.11)
-      entry_script:   { type: string, default: '' }      # app's main .py (e.g. main.py); enables the import check when set
+      python_version:      { type: string, default: '3.11' }  # match the deployment target (Raspberry Pi OS Bookworm ships 3.11)
+      entry_script:        { type: string, default: '' }      # app's main .py (e.g. main.py); enables the import check when set
+      verify_dev_pins:     { type: boolean, default: false }  # require requirements-dev.txt to match _buildtools/templates/dev/requirements.txt
+      verify_runtime_lock: { type: boolean, default: false }  # require requirements.txt to match a fresh uv-compiled requirements.in, and install it with --require-hashes
+      shellcheck:          { type: boolean, default: false }  # lint shellcheck_paths with a pinned ShellCheck
+      shellcheck_paths:    { type: string, default: 'install.sh uninstall.sh' }  # space-separated, caller-owned files only
 
 jobs:
   check:
@@ -30,11 +34,21 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: _buildtools
+      - name: Verify dev tooling pins
+        if: ${{ inputs.verify_dev_pins }}
+        run: bash _buildtools/scripts/checks/verify_dev_pins.sh
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ "${{ inputs.verify_runtime_lock }}" = "true" ]; then
+            python -m pip install --require-hashes -r requirements.txt
+          else
+            if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          fi
           pip install -r _buildtools/templates/dev/requirements.txt
+      - name: Verify runtime lock
+        if: ${{ inputs.verify_runtime_lock }}
+        run: bash _buildtools/scripts/checks/verify_runtime_lock.sh
       - name: Lint (ruff)
         run: |
           # --exclude _buildtools: that folder is this workflow's own checkout,
@@ -51,3 +65,6 @@ jobs:
           else
             echo "No tests folder; skipping pytest."
           fi
+      - name: ShellCheck
+        if: ${{ inputs.shellcheck }}
+        run: bash _buildtools/scripts/checks/run_shellcheck.sh "${{ inputs.shellcheck_paths }}"
