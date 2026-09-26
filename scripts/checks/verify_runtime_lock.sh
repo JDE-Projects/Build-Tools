@@ -4,6 +4,14 @@
 # install (--require-hashes) is installing what the source file actually
 # resolves to and not a stale or hand-edited lock.
 #
+# The regeneration keeps the versions already pinned in requirements.txt
+# wherever requirements.in still allows them, so a new upstream release of an
+# indirect dependency does not fail the check on its own. The check fails when
+# requirements.in changed without a matching lock update, or when the lock was
+# edited by hand. Only the committed versions are carried over: every hash is
+# fetched fresh from the package index, never copied from the committed file,
+# so a wrong or tampered hash still fails.
+#
 # Usage: verify_runtime_lock.sh [requirements_in] [requirements_txt]
 #   requirements_in  defaults to ./requirements.in
 #   requirements_txt defaults to ./requirements.txt
@@ -14,6 +22,8 @@
 #   install command: pip install uv==0.12.17
 #   compile command: uv pip compile --universal --generate-hashes \
 #                       --python-version 3.10 requirements.in -o <tempfile>
+# where <tempfile> starts as a copy of requirements.txt with its hash lines
+# removed (uv reads existing pins from the output file and keeps them).
 # A maintainer regenerating the lock by hand should install that exact uv
 # version and run that exact command from the repo root.
 #
@@ -37,6 +47,12 @@ if [ ! -f "$REQUIREMENTS_TXT" ]; then
   exit 1
 fi
 
+# Print a lock file with its --hash lines and trailing line-continuation
+# backslashes removed, leaving the pinned versions, markers, and comments.
+seed_versions() {
+  tr -d '\r' < "$1" | sed -e '/--hash=/d' -e 's/[[:space:]]*\\[[:space:]]*$//'
+}
+
 CLEANUP_TMP=""
 cleanup() {
   [ -n "$CLEANUP_TMP" ] && rm -f "$CLEANUP_TMP"
@@ -58,6 +74,13 @@ else
   }
   REGENERATED_FILE="$(mktemp)"
   CLEANUP_TMP="$REGENERATED_FILE"
+  # Seed the output file with the committed versions only. uv keeps pins it
+  # finds in the output file, and it also reuses any hashes it finds there,
+  # so the hash lines and their line continuations are stripped first.
+  seed_versions "$REQUIREMENTS_TXT" > "$REGENERATED_FILE" || {
+    echo "verify_runtime_lock: failed to seed from $REQUIREMENTS_TXT" >&2
+    exit 1
+  }
   uv pip compile --universal --generate-hashes --python-version 3.10 \
     "$REQUIREMENTS_IN" -o "$REGENERATED_FILE" || {
     echo "verify_runtime_lock: uv pip compile failed" >&2
@@ -76,7 +99,7 @@ REGENERATED_BODY="$(normalize "$REGENERATED_FILE")"
 COMMITTED_BODY="$(normalize "$REQUIREMENTS_TXT")"
 
 if [ "$REGENERATED_BODY" = "$COMMITTED_BODY" ]; then
-  echo "verify_runtime_lock: $REQUIREMENTS_TXT matches a fresh regeneration from $REQUIREMENTS_IN."
+  echo "verify_runtime_lock: $REQUIREMENTS_TXT matches a regeneration from $REQUIREMENTS_IN (committed versions kept, hashes re-fetched)."
   exit 0
 fi
 
