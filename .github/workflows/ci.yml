@@ -12,7 +12,7 @@ on:
       python_version:      { type: string, default: '3.11' }  # match the deployment target (Raspberry Pi OS Bookworm ships 3.11)
       entry_script:        { type: string, default: '' }      # app's main .py (e.g. main.py); enables the import check when set
       verify_dev_pins:     { type: boolean, default: false }  # require requirements-dev.txt to match _buildtools/templates/dev/requirements.txt
-      verify_runtime_lock: { type: boolean, default: false }  # require requirements.txt to match a fresh uv-compiled requirements.in, and install it with --require-hashes
+      verify_runtime_lock: { type: boolean, default: false }  # require requirements.txt to match requirements.in (uv-compiled, committed versions kept, hashes re-fetched), and install it with --require-hashes
       shellcheck:          { type: boolean, default: false }  # lint shellcheck_paths with a pinned ShellCheck
       shellcheck_paths:    { type: string, default: 'install.sh uninstall.sh' }  # space-separated, caller-owned files only
 
