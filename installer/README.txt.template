@@ -10,6 +10,13 @@ Support and reporting problems
   If this tool is useful to you, you can buy me a coffee:
     https://ko-fi.com/jdeprojects   (optional, always appreciated)
 
+Privacy
+  Other than the job you ask of it, this app makes one automatic network
+  call: a check to GitHub for a newer release (at startup and when you press
+  Check for updates), which sends only a version request. It collects and
+  sends no personal data, usage data, or analytics.
+  Privacy policy:  https://jde-projects.com/privacy
+
 License
   Released under the PolyForm Noncommercial License 1.0.0. Personal and any
   noncommercial use is permitted; commercial use is not. See the LICENSE file
