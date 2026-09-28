@@ -331,3 +331,23 @@ def test_read_first_json_line_rejects_empty_first_line(tmp_path):
     path.write_text("\n", encoding="utf-8")
     with pytest.raises(drive.SetupError, match="empty"):
         drive.read_first_json_line(path, timeout_s=2)
+
+
+# --------------------------------------------------------------------------
+# fixture_env
+# --------------------------------------------------------------------------
+
+def test_fixture_env_adds_out_dir_without_mutating_base(tmp_path):
+    base = {"PATH": "C:/somewhere"}
+    out_dir = tmp_path / "out"
+    env = drive.fixture_env(base, out_dir)
+    assert env["UI_DRIVE_OUT_DIR"] == str(out_dir)
+    assert env["PATH"] == "C:/somewhere"
+    assert "UI_DRIVE_OUT_DIR" not in base
+
+
+def test_fixture_env_overrides_existing_var(tmp_path):
+    base = {"UI_DRIVE_OUT_DIR": "stale"}
+    out_dir = tmp_path / "out"
+    env = drive.fixture_env(base, out_dir)
+    assert env["UI_DRIVE_OUT_DIR"] == str(out_dir)

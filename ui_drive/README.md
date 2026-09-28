@@ -95,6 +95,14 @@ would otherwise stall. Because stdout is a file, Python holds printed text
 back until its buffer fills, so print the JSON line with `flush=True`:
 without it, `drive.py` waits the full launch timeout and gives up.
 
+A fixture is killed along with the job when the run ends, so it never gets a
+chance to clean up its own files. `drive.py` sets the environment variable
+`UI_DRIVE_OUT_DIR` on the fixture's process to the run's output folder (the
+same folder `results.json` and any screenshots land in); a fixture should
+write its own throwaway files (a test server's working folder, sample files
+it builds) under that path instead of the app's repo, so they are deleted
+along with the rest of the run's output rather than left behind.
+
 ## Writing a scenario
 
 A scenario file is a JS module whose default export is an async function.

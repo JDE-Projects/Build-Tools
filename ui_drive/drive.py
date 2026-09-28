@@ -669,6 +669,17 @@ def read_first_json_line(path: Path, timeout_s: float, poll_interval_s: float = 
     raise SetupError(f"fixture did not print its JSON line to {path.name} within {timeout_s}s")
 
 
+def fixture_env(base_env: dict, out_dir: Path) -> dict:
+    """Returns base_env plus UI_DRIVE_OUT_DIR pointing at the run's output
+    folder, so a fixture has somewhere to put its own throwaway files. A
+    fixture is killed with the job and never gets a chance to clean up after
+    itself, so anything it writes under this folder is deleted along with the
+    rest of the run's output. Pure and testable without launching anything."""
+    env = dict(base_env)
+    env["UI_DRIVE_OUT_DIR"] = str(out_dir)
+    return env
+
+
 def open_inheritable_log_handle(path: Path) -> tuple[int, wintypes.HANDLE]:
     """Opens path for writing with an OS handle that a child process can
     inherit, for redirecting a suspended-launched process's stdout/stderr
@@ -750,7 +761,7 @@ def main(argv: list[str]) -> int:
                     job,
                     [interpreter, str(plan["fixture_path"])],
                     repo,
-                    dict(os.environ),
+                    fixture_env(os.environ, out_dir),
                     stdout_handle=out_handle,
                     stderr_handle=err_handle,
                 )
