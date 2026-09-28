@@ -91,8 +91,8 @@ file list is taken relative to the app repo, not the git repo's top level.
 If the app repo is not inside a git work tree at all, `drive.py` refuses with
 a clear message.
 
-The manifest (`tools/ui_check/ui_drive.json`) is still read and validated
-against the real repo, exactly as before. The entry script and the
+The manifest (`tools/ui_check/ui_drive.json`) is read and validated
+against the real repo. The entry script and the
 scenario's `script` and `fixture` paths, once validated, are then resolved
 against the copy instead, so the app, the scenario, and the fixture all run
 from inside the run folder.
@@ -101,7 +101,7 @@ from inside the run folder.
 
 The app and its fixture both get `PYTHONDONTWRITEBYTECODE=1` and a private
 `TEMP`/`TMP` pointing at `<run folder>\tmp`. The fixture additionally gets
-`UI_DRIVE_OUT_DIR` (the run folder, unchanged from before) and
+`UI_DRIVE_OUT_DIR` (the run folder) and
 `UI_DRIVE_APP_DIR` (the copy), so a fixture that needs to can pre-place
 sample data, a database file, for example, next to the copied app before it
 launches; the fixture already runs before the app does.
@@ -182,12 +182,15 @@ back until its buffer fills, so print the JSON line with `flush=True`:
 without it, `drive.py` waits the full launch timeout and gives up.
 
 A fixture is killed along with the job when the run ends, so it never gets a
-chance to clean up its own files. `drive.py` sets the environment variable
-`UI_DRIVE_OUT_DIR` on the fixture's process to the run's output folder (the
-same folder `results.json` and any screenshots land in); a fixture should
-write its own throwaway files (a test server's working folder, sample files
-it builds) under that path instead of the app's repo, so they are deleted
-along with the rest of the run's output rather than left behind.
+chance to clean up its own files. Write a fixture to use only the two
+folders `drive.py` hands it: `UI_DRIVE_OUT_DIR`, the run's output folder
+(the same folder `results.json` and any screenshots land in), for its own
+throwaway files such as a test server's working folder, and
+`UI_DRIVE_APP_DIR`, the copied app, for sample data the app must find next
+to itself. Both sit inside the run folder, so what the fixture writes there
+is deleted along with the rest of the run. `drive.py` passes these folders
+but cannot enforce them: a fixture that writes anywhere else leaves those
+files behind.
 
 ## Writing a scenario
 
