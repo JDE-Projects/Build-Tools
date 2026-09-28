@@ -39,7 +39,7 @@ Example, using this repo's worked example:
 To remove a run folder once you're done looking at it:
 
 ```
-python ui_drive\drive.py cleanup <run folder>
+<app repo>\.venv\Scripts\python.exe <build-tools>\ui_drive\drive.py cleanup <run folder>
 ```
 
 The app must not already be running: if its single-instance mutex is held,
@@ -47,10 +47,21 @@ The app must not already be running: if its single-instance mutex is held,
 copy.
 
 The app repo is only ever read. Every run starts by copying it into a fresh
-folder under `%TEMP%` (`ui-drive-<random>`, printed at the start of the run),
-and everything the run does from then on, launching the app, running the
-fixture, and writing settings, databases, sample data, logs, and
-screenshots, happens inside that one folder. The run folder holds:
+folder directly under the system temp folder, named `ui-drive-` followed by
+32 random hex characters (printed at the start of the run), and everything
+the run does from then on, launching the app, running the fixture, and
+writing settings, databases, sample data, logs, and screenshots, happens
+inside that one folder. The folder is created outright (it fails if a name
+is somehow already taken, in which case a new random name is tried) and then
+held open for the whole run in a way that stops it being renamed, moved, or
+replaced by anything else running as the same Windows user; every file
+`drive.py` itself writes inside it, and every subfolder it creates, is
+checked the same way and created fresh, never overwriting something already
+there. This closes the door on another program racing `drive.py` to swap in
+a symlink or a different folder while a run is going. It does not, and
+cannot, stop the app or the fixture from writing wherever their own code
+tells them to: that is the same as running them by hand, not something this
+tool sits between. The run folder holds:
 
 - `app\`, the throwaway copy of the app repo the app and fixture actually run
   from
@@ -98,15 +109,24 @@ launches; the fixture already runs before the app does.
 ### Cleanup
 
 `drive.py cleanup <run folder>` deletes one run folder. It never kills a
-process: only `drive.py`'s own run does that, through the job object. It
-refuses (exit code 2, with a plain message) unless all of these hold: the
-path is not a reparse point; its canonical parent is `%TEMP%`; its name
-matches `ui-drive-*`; `.ui-drive-run` exists and its recorded path matches
-the folder; `.teardown-complete` exists; and the lock file can be locked
-exclusively (nothing, meaning no live `drive.py`, is still holding it).
-Deletion never follows a symlink or junction found inside the folder: such
-an entry is removed as the link itself, its target is left untouched. Exit
-code 0 means the folder was deleted and verified gone.
+process: only `drive.py`'s own run does that, through the job object. The
+folder is held open (the same way a run holds its own folder open) for the
+whole cleanup, so nothing else can rename, move, or replace it out from
+under the delete. Cleanup refuses (exit code 2, with a plain message) unless
+all of these hold: the path is a plain directory, not a reparse point; its
+canonical parent is the system temp folder; its name matches
+`ui-drive-` followed by 32 hex characters; `.ui-drive-run` exists and its
+recorded path matches the folder; `.teardown-complete` exists; and the lock
+file can be locked exclusively (nothing, meaning no live `drive.py`, is
+still holding it). Deleting the contents walks the folder top-down, holding
+each real subdirectory open the same way as the root while it is being
+emptied; a symlink or junction found anywhere inside, file or directory, is
+deleted as the link itself and never entered, so its target is left
+untouched. Every one of these checks is read from the thing actually being
+acted on (an open handle), never just trusted from a path string, and any
+unexpected result refuses rather than falling back to an ordinary
+path-based delete. Exit code 0 means the folder was deleted and verified
+gone.
 
 Exit code for a run is 0 only when every check passed and cleanup was
 verified, 1 when cleanup was verified but a check failed, and 2 whenever
@@ -146,9 +166,10 @@ is not in the manifest is rejected the same way.
 ### Fixtures
 
 A fixture is a plain Python script, run with the same interpreter as the
-app, with the repo as its working directory. It prints exactly one line of
-JSON to stdout (for example, a throwaway test server's port and a login the
-scenario should use), then keeps running until `drive.py` shuts it down.
+app, with the run folder's copy of the app (`app\`) as its working
+directory. It prints exactly one line of JSON to stdout (for example, a
+throwaway test server's port and a login the scenario should use), then
+keeps running until `drive.py` shuts it down.
 That JSON is handed to the scenario as `fixture`. The fixture runs inside the
 same job as the app, so it is torn down at the same time, even if it forgot
 to clean up after itself.
@@ -238,6 +259,22 @@ The app runs from the copy as the same Windows user running `drive.py`, with
 the same permissions that user has everywhere else: the copy is a fresh
 folder the app cannot tell apart from a real install, not a sandbox. Nothing
 here stops the app from reading or writing outside its own folder if its own
-code does that. Before pointing this at a new app, check what the app writes
-and where, so a run's list of side effects is known ahead of time rather than
-found by surprise.
+code does that. The same is true of a scenario's `.js` file and a fixture's
+`.py` file: they run with the same permissions as everything else and are
+expected to already be reviewed code, the same trust as the app itself.
+Before pointing this at a new app, check what the app writes and where, so a
+run's list of side effects is known ahead of time rather than found by
+surprise.
+
+`drive.py` itself is held to a tighter rule than the app, the scenario, or
+the fixture: it has no path of its own to delete, overwrite, or create
+anything outside the one run folder it made for itself, even if another
+program running as the same user is actively racing it. Every folder it
+creates is opened in a way that stops it being renamed or replaced while
+`drive.py` is using it, and every file it writes is created fresh and
+refuses if anything, including a symlink, already sits at that name. Any
+check along the way that cannot be verified refuses outright (exit code 2)
+rather than falling back to a plain path-based read, write, or delete. This
+protects `drive.py`'s own bookkeeping, not the app: what the app, the
+scenario, and the fixture do with their own files is outside this
+boundary, exactly as described above.

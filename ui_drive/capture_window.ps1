@@ -10,7 +10,9 @@
     reported size and the bitmap it captures agree on any monitor scaling.
 
     Not meant to be run by hand day to day: drive.py calls this with the
-    window handle it just found and the path to save to.
+    window handle it just found and the path to save to. Writes with
+    FileMode.CreateNew, so it fails rather than overwriting anything already
+    at OutPath.
 
 .PARAMETER Hwnd
     The window handle (as a plain integer) to capture.
@@ -85,7 +87,12 @@ if (-not $ok) {
     exit 1
 }
 
-$bitmap.Save($OutPath, [System.Drawing.Imaging.ImageFormat]::Png)
+$stream = [System.IO.File]::Open($OutPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+try {
+    $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+} finally {
+    $stream.Dispose()
+}
 $graphics.Dispose()
 $bitmap.Dispose()
 Write-Output "wrote $OutPath ($width x $height)"

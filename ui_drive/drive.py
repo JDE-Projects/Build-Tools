@@ -215,25 +215,64 @@ def copy_repo_to(repo: Path, app_dir: Path) -> None:
     """Copies the repo's working-tree files into app_dir, preserving relative
     layout. Skips a listed path that no longer exists on disk (a tracked file
     that was since deleted). Refuses, before copying anything, any entry that
-    is a symlink/reparse point or whose resolved path falls outside the repo."""
+    is a symlink/reparse point or whose resolved path falls outside the repo,
+    or whose destination would fall outside app_dir.
+
+    Every directory under app_dir this creates is pinned (see pin_directory)
+    before anything is written into it, and the pin is held until the whole
+    copy finishes, so a directory this function just created cannot be
+    swapped for a reparse point partway through. Each file is created
+    exclusively (copy_file_exclusive), never overwritten."""
     repo_resolved = repo.resolve()
+    app_dir_resolved = app_dir.resolve()
     files = list_repo_files(repo)
-    for rel in files:
-        src = repo / rel
-        if is_reparse_point(src):
-            raise SetupError(f"refusing to copy a symlink/reparse point from the repo: {rel}")
-        if not src.exists():
-            continue
-        if not src.is_file():
-            continue
-        resolved = src.resolve()
-        try:
-            resolved.relative_to(repo_resolved)
-        except ValueError:
-            raise SetupError(f"refusing to copy a path that resolves outside the repo: {rel}")
-        dest = app_dir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
+
+    pinned: dict[Path, int] = {}
+
+    def pin(dir_path: Path) -> None:
+        dir_resolved = dir_path.resolve()
+        if dir_resolved != app_dir_resolved:
+            try:
+                dir_resolved.relative_to(app_dir_resolved)
+            except ValueError as exc:
+                raise SetupError(f"refusing to write outside the destination: {dir_resolved}") from exc
+        if dir_resolved in pinned:
+            return
+        pinned[dir_resolved] = pin_directory(dir_path)
+
+    try:
+        pin(app_dir)
+        for rel in files:
+            src = repo / rel
+            if is_reparse_point(src):
+                raise SetupError(f"refusing to copy a symlink/reparse point from the repo: {rel}")
+            if not src.exists():
+                continue
+            if not src.is_file():
+                continue
+            resolved = src.resolve()
+            try:
+                resolved.relative_to(repo_resolved)
+            except ValueError as exc:
+                raise SetupError(f"refusing to copy a path that resolves outside the repo: {rel}") from exc
+
+            dest = app_dir / rel
+            dest_resolved = app_dir_resolved / rel
+            try:
+                dest_resolved.relative_to(app_dir_resolved)
+            except ValueError as exc:
+                raise SetupError(f"refusing to write outside the destination: {rel}") from exc
+
+            parent = app_dir
+            for part in Path(rel).parts[:-1]:
+                parent = parent / part
+                parent.mkdir(exist_ok=True)
+                pin(parent)
+
+            copy_file_exclusive(src, dest)
+    finally:
+        for handle in pinned.values():
+            _close_win_handle(handle)
 
 
 def repo_path_to_copy(repo: Path, app_dir: Path, absolute_path: Path) -> Path:
@@ -248,22 +287,78 @@ def repo_path_to_copy(repo: Path, app_dir: Path, absolute_path: Path) -> Path:
 # marker that only appears once cleanup is verified.
 # --------------------------------------------------------------------------
 
-def create_run_dir() -> Path:
-    run_dir = Path(tempfile.mkdtemp(prefix="ui-drive-", dir=tempfile.gettempdir())).resolve()
-    marker = {"run_id": secrets.token_hex(16), "path": str(run_dir)}
-    (run_dir / RUN_MARKER_NAME).write_text(json.dumps(marker), encoding="utf-8")
-    return run_dir
+RUN_DIR_NAME_RE = re.compile(r"^ui-drive-[0-9a-f]{32}$")
 
 
-def acquire_run_lock(run_dir: Path) -> int:
+def create_run_dir(attempts: int = 5) -> tuple[Path, int]:
+    """Creates a fresh run folder directly under the system temp folder,
+    named `ui-drive-` followed by 32 random hex characters (os.mkdir fails
+    outright if that exact name is already taken, so nothing can be planted
+    at the chosen name ahead of us; a collision just means trying a new
+    random name). Pins the new folder immediately, verifying through the
+    handle that it is really the plain directory just created and not
+    something swapped in during the gap between mkdir and this check, and
+    writes the run marker into it exclusively. Returns (run_dir, pin
+    handle); the caller holds the handle open for the rest of the run and
+    closes it when done."""
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    last_exc: Exception | None = None
+    for _ in range(attempts):
+        name = "ui-drive-" + secrets.token_hex(16)
+        run_dir = temp_root / name
+        try:
+            os.mkdir(run_dir)
+        except FileExistsError as exc:
+            last_exc = exc
+            continue
+        handle = pin_directory(run_dir)
+        try:
+            marker = {"run_id": secrets.token_hex(16), "path": str(run_dir)}
+            write_exclusive_text(run_dir / RUN_MARKER_NAME, json.dumps(marker))
+        except Exception:
+            _close_win_handle(handle)
+            raise
+        return run_dir, handle
+    raise SetupError(f"could not create a run folder under {temp_root}: {last_exc}")
+
+
+def acquire_run_lock(run_dir: Path, *, create: bool = True) -> int:
     """Opens and exclusively locks <run_dir>\\.ui-drive.lock for the life of
     this process. The handle is kept open (and so the lock held) until
     release_run_lock is called; `cleanup` later uses the same lock to refuse
-    to delete a run folder a live drive.py is still using."""
+    to delete a run folder a live drive.py is still using.
+
+    When create is True (a fresh run creating its own lock file for the
+    first time), the file is created exclusively: it must not already
+    exist, including as a link. When False (cleanup, opening a lock file a
+    run already created), the file is opened and verified through one
+    no-follow handle before that same handle is locked."""
     lock_path = run_dir / LOCK_FILE_NAME
-    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT | os.O_BINARY)
+    if create:
+        try:
+            fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_BINARY)
+        except FileExistsError as exc:
+            raise SetupError(f"refusing to overwrite an existing path: {lock_path}") from exc
+    else:
+        # Cleanup never falls back to a path-based reopen after inspection:
+        # a same-user racer could replace the name with a reparse point in
+        # that gap. Turn the verified handle itself into the fd we lock.
+        handle = _win_open_handle(
+            str(lock_path),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            OPEN_ALWAYS,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+        try:
+            attrs, _tag = _handle_attributes(handle)
+            if attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY):
+                raise SetupError(f"{lock_path} is not a regular non-reparse file")
+            fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+        except Exception:
+            _close_win_handle(handle)
+            raise
     try:
-        os.write(fd, b"0")
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
     except OSError as exc:
@@ -285,7 +380,7 @@ def release_run_lock(fd: int | None) -> None:
 
 
 def write_teardown_marker(run_dir: Path) -> None:
-    (run_dir / TEARDOWN_MARKER_NAME).write_text("", encoding="utf-8")
+    write_exclusive_text(run_dir / TEARDOWN_MARKER_NAME, "")
 
 
 def base_child_env(base_env: dict, run_dir: Path) -> dict:
@@ -555,6 +650,279 @@ user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.restype = ctypes.c_int
 
 
+# --------------------------------------------------------------------------
+# Pinned-handle helpers. A "pin" is a directory handle opened with a share
+# mode that excludes FILE_SHARE_DELETE, so nothing (running as this same
+# user) can rename, move, or replace that directory while the handle is
+# open; everything we do underneath it is checked against the handle, never
+# just trusted from a path string. Every check here fails closed: on any
+# unexpected result (wrong type, an unexpected reparse point, a canonical
+# path that does not match) this raises SetupError rather than falling back
+# to an ordinary path-based operation.
+# --------------------------------------------------------------------------
+
+GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
+DELETE = 0x00010000
+FILE_READ_ATTRIBUTES = 0x00000080
+FILE_WRITE_ATTRIBUTES = 0x00000100
+FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+FILE_SHARE_DELETE = 0x00000004
+OPEN_EXISTING = 3
+OPEN_ALWAYS = 4
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+FILE_ATTRIBUTE_READONLY = 0x00000001
+FILE_ATTRIBUTE_NORMAL = 0x00000080
+
+FileBasicInfo = 0
+FileDispositionInfo = 4
+FileAttributeTagInfo = 9
+FileDispositionInfoEx = 21
+
+FILE_DISPOSITION_FLAG_DELETE = 0x00000001
+FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x00000002
+FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE = 0x00000010
+
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
+    _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
+
+
+class FILE_DISPOSITION_INFO(ctypes.Structure):
+    _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
+
+
+class FILE_DISPOSITION_INFO_EX(ctypes.Structure):
+    _fields_ = [("Flags", wintypes.DWORD)]
+
+
+class FILE_BASIC_INFO(ctypes.Structure):
+    _fields_ = [
+        ("CreationTime", ctypes.c_int64),
+        ("LastAccessTime", ctypes.c_int64),
+        ("LastWriteTime", ctypes.c_int64),
+        ("ChangeTime", ctypes.c_int64),
+        ("FileAttributes", wintypes.DWORD),
+    ]
+
+
+kernel32.CreateFileW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.HANDLE,
+]
+kernel32.CreateFileW.restype = wintypes.HANDLE
+kernel32.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+kernel32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+kernel32.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+
+
+def _win_open_handle(path: str, access: int, share: int, disposition: int, flags: int) -> int:
+    handle = kernel32.CreateFileW(path, access, share, None, disposition, flags, None)
+    if handle is None or handle == _INVALID_HANDLE_VALUE:
+        err = ctypes.get_last_error()
+        raise SetupError(f"could not open {path}: WinError {err}")
+    return handle
+
+
+def _close_win_handle(handle: int) -> None:
+    kernel32.CloseHandle(handle)
+
+
+def _handle_attributes(handle: int) -> tuple[int, int]:
+    info = FILE_ATTRIBUTE_TAG_INFO()
+    ok = kernel32.GetFileInformationByHandleEx(
+        handle, FileAttributeTagInfo, ctypes.byref(info), ctypes.sizeof(info)
+    )
+    if not ok:
+        raise SetupError(f"GetFileInformationByHandleEx failed: WinError {ctypes.get_last_error()}")
+    return info.FileAttributes, info.ReparseTag
+
+
+def _strip_extended_prefix(p: str) -> str:
+    if p.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + p[8:]
+    if p.startswith("\\\\?\\"):
+        return p[4:]
+    return p
+
+
+def _handle_final_path(handle: int) -> str:
+    buf_len = 512
+    while True:
+        buf = ctypes.create_unicode_buffer(buf_len)
+        n = kernel32.GetFinalPathNameByHandleW(handle, buf, buf_len, 0)
+        if n == 0:
+            raise SetupError(f"GetFinalPathNameByHandleW failed: WinError {ctypes.get_last_error()}")
+        if n < buf_len:
+            return _strip_extended_prefix(buf.value)
+        buf_len = n + 1
+
+
+def pin_directory(path: Path, access: int = FILE_READ_ATTRIBUTES) -> int:
+    """Opens path as a directory with a share mode that excludes
+    FILE_SHARE_DELETE (so it cannot be renamed, moved, or replaced while
+    this handle stays open), then verifies through the handle itself that
+    it really is a plain directory sitting at the expected canonical path,
+    not a reparse point or something swapped in during the gap between
+    whatever created it and this check. Raises SetupError on any mismatch;
+    never falls back to trusting the path string. The caller closes the
+    returned handle (via _close_win_handle) once it no longer needs the
+    pin."""
+    expected = str(path.resolve()).rstrip("\\").lower()
+    handle = _win_open_handle(
+        str(path),
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+    try:
+        attrs, _tag = _handle_attributes(handle)
+        if not (attrs & FILE_ATTRIBUTE_DIRECTORY):
+            raise SetupError(f"{path} is not a directory")
+        if attrs & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise SetupError(f"{path} is an unexpected reparse point")
+        final_path = _handle_final_path(handle).rstrip("\\").lower()
+        if final_path != expected:
+            raise SetupError(f"{path} canonical path did not match ({final_path!r} != {expected!r})")
+    except Exception:
+        _close_win_handle(handle)
+        raise
+    return handle
+
+
+def exclusive_create(path: Path) -> int:
+    """Opens path for writing, failing if anything already exists there,
+    including a symlink or other reparse point: O_CREAT | O_EXCL maps to
+    CreateFileW's CREATE_NEW disposition on Windows, whose existence check
+    applies to whatever object already sits at that name without following
+    a reparse point into its target. Returns a file descriptor the caller
+    must close."""
+    try:
+        return os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY)
+    except FileExistsError as exc:
+        raise SetupError(f"refusing to overwrite an existing path: {path}") from exc
+
+
+def write_exclusive_bytes(path: Path, data: bytes) -> None:
+    fd = exclusive_create(path)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
+def write_exclusive_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    write_exclusive_bytes(path, text.encode(encoding))
+
+
+def copy_file_exclusive(src: Path, dest: Path) -> None:
+    """Copies src's content into a newly created dest, refusing if dest (or
+    a link at that name) already exists. Preserving the source's mtime is
+    not attempted."""
+    fd = exclusive_create(dest)
+    with os.fdopen(fd, "wb") as f_dest, open(src, "rb") as f_src:
+        shutil.copyfileobj(f_src, f_dest)
+
+
+def _clear_readonly_via_handle(handle: int) -> None:
+    attrs, _tag = _handle_attributes(handle)
+    new_attrs = attrs & ~FILE_ATTRIBUTE_READONLY
+    if new_attrs == 0:
+        new_attrs = FILE_ATTRIBUTE_NORMAL
+    basic = FILE_BASIC_INFO()
+    basic.FileAttributes = new_attrs
+    ok = kernel32.SetFileInformationByHandle(handle, FileBasicInfo, ctypes.byref(basic), ctypes.sizeof(basic))
+    if not ok:
+        raise SetupError(f"SetFileInformationByHandle failed: WinError {ctypes.get_last_error()}")
+
+
+def _delete_via_handle(handle: int) -> None:
+    """Deletes whatever handle refers to (file, reparse point, or empty
+    directory) through the handle itself, never through its path. Tries
+    FileDispositionInfoEx with POSIX semantics and ignore-readonly first
+    (a single call that also works on a read-only file); falls back to
+    clearing read-only via FileBasicInfo and then the older
+    FileDispositionInfo on a Windows version that does not support the Ex
+    variant."""
+    info_ex = FILE_DISPOSITION_INFO_EX()
+    info_ex.Flags = (
+        FILE_DISPOSITION_FLAG_DELETE
+        | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+        | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE
+    )
+    ok = kernel32.SetFileInformationByHandle(handle, FileDispositionInfoEx, ctypes.byref(info_ex), ctypes.sizeof(info_ex))
+    if ok:
+        return
+    _clear_readonly_via_handle(handle)
+    info = FILE_DISPOSITION_INFO()
+    info.DeleteFile = True
+    ok2 = kernel32.SetFileInformationByHandle(handle, FileDispositionInfo, ctypes.byref(info), ctypes.sizeof(info))
+    if not ok2:
+        raise SetupError(f"could not delete through its handle: WinError {ctypes.get_last_error()}")
+
+
+def _open_child_no_follow(parent_path: str, name: str, access: int) -> int:
+    """Opens <parent_path>\\<name> without following a reparse point at
+    that name: the attributes read back from the resulting handle (never
+    the path) decide whether it is a real directory to recurse into or a
+    file/reparse point to delete outright."""
+    full = parent_path.rstrip("\\") + "\\" + name
+    return _win_open_handle(
+        full,
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+
+
+def _delete_tree_via_handles(root_handle: int, root_path: str) -> None:
+    """Deletes everything under root_handle (a pinned handle already
+    verified to be a real, non-reparse directory at root_path) and then
+    root itself, bottom-up. A child that turns out to be a real directory
+    is pinned in turn and recursed into; a reparse point (file or
+    directory) or a regular file is deleted directly through its own
+    handle and never entered. Always closes root_handle before returning,
+    whether or not this raises."""
+    try:
+        names = [entry.name for entry in os.scandir(root_path)]
+        for name in names:
+            child_handle = _open_child_no_follow(
+                root_path, name, DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES
+            )
+            recursed = False
+            try:
+                attrs, _tag = _handle_attributes(child_handle)
+                is_dir = bool(attrs & FILE_ATTRIBUTE_DIRECTORY)
+                is_reparse = bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+                if is_dir and not is_reparse:
+                    child_path = root_path.rstrip("\\") + "\\" + name
+                    _delete_tree_via_handles(child_handle, child_path)
+                    recursed = True
+                else:
+                    _delete_via_handle(child_handle)
+            finally:
+                if not recursed:
+                    _close_win_handle(child_handle)
+    finally:
+        _delete_via_handle(root_handle)
+        _close_win_handle(root_handle)
+
+
 def _job_pid_list_type(max_pids: int):
     class JOBOBJECT_BASIC_PROCESS_ID_LIST(ctypes.Structure):
         _fields_ = [
@@ -739,11 +1107,12 @@ def close_window(hwnd: int) -> None:
     user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
 
-def capture_whole_window(hwnd: int, out_path: Path) -> bool:
+def capture_whole_window(hwnd: int, out_path: Path, run_dir: Path) -> bool:
     """Shells out to capture_window.ps1 to save the whole window, title bar
     included, via PrintWindow. Returns True on success; failures are
     reported by the caller rather than raised, since a failed screenshot
-    should not stop cleanup."""
+    should not stop cleanup. Runs with a private TEMP/TMP under the run
+    folder, same as the app and fixture."""
     script = HERE / "capture_window.ps1"
     try:
         result = subprocess.run(
@@ -762,6 +1131,7 @@ def capture_whole_window(hwnd: int, out_path: Path) -> bool:
             capture_output=True,
             text=True,
             timeout=30,
+            env=base_child_env(os.environ, run_dir),
         )
     except Exception as exc:
         print(f"FAIL window capture failed: {exc}")
@@ -830,7 +1200,10 @@ def open_inheritable_log_handle(path: Path) -> tuple[int, wintypes.HANDLE]:
     straight to a file. Returns (fd, handle); the caller closes fd once
     CreateProcessW has run (the child gets its own reference through handle
     inheritance, so the parent's fd is not needed afterward)."""
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_BINARY)
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY)
+    except FileExistsError as exc:
+        raise SetupError(f"refusing to overwrite an existing path: {path}") from exc
     handle = wintypes.HANDLE(msvcrt.get_osfhandle(fd))
     if not kernel32.SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT):
         os.close(fd)
@@ -850,6 +1223,39 @@ def compute_exit_code(cleanup_verified: bool, checks_ok: bool, capture_ok: bool,
     if checks_ok and capture_ok and window_ok:
         return 0
     return 1
+
+
+def collect_scenario_results(results_path: Path, node_returncode: int) -> dict:
+    """Returns scenario results, treating a failed Node process as an error
+    before reading any file it might have left behind."""
+    if node_returncode != 0:
+        return {"checks": [], "error": f"cdp.mjs exited {node_returncode} before writing results"}
+
+    results = {"checks": [], "error": None}
+    if results_path.is_file():
+        try:
+            return json.loads(results_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            results["error"] = "results.json was not valid JSON"
+    else:
+        results["error"] = "cdp.mjs exited 0 without writing results"
+    return results
+
+
+def prepare_run_subdirectories(run_dir: Path) -> tuple[Path, Path]:
+    """Creates and verifies the run's private temp and app directories.
+    Any existing path or failed pin is a clean setup refusal."""
+    directories = []
+    for name in ("tmp", "app"):
+        path = run_dir / name
+        try:
+            path.mkdir()
+            handle = pin_directory(path)
+        except (OSError, SetupError) as exc:
+            raise SetupError(f"could not create and pin {path}: {exc}") from exc
+        _close_win_handle(handle)
+        directories.append(path)
+    return tuple(directories)
 
 
 def main(argv: list[str]) -> int:
@@ -885,22 +1291,17 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
-    run_dir = create_run_dir()
-    print(f"run folder: {run_dir}")
-
     try:
-        lock_fd = acquire_run_lock(run_dir)
+        run_dir, run_pin_handle = create_run_dir()
     except SetupError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+    print(f"run folder: {run_dir}")
 
     try:
-        (run_dir / "tmp").mkdir(exist_ok=True)
-        app_dir = run_dir / "app"
-        app_dir.mkdir(exist_ok=True)
-
+        lock_fd = None
         try:
-            copy_repo_to(repo, app_dir)
+            lock_fd = acquire_run_lock(run_dir)
         except SetupError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
@@ -917,132 +1318,148 @@ def main(argv: list[str]) -> int:
         port = None
 
         try:
-            port = find_free_port()
-            job = create_job_with_kill_on_close()
+            tmp_dir, app_dir = prepare_run_subdirectories(run_dir)
 
-            entry_path = repo_path_to_copy(repo, app_dir, plan["entry_path"])
-            script_path = repo_path_to_copy(repo, app_dir, plan["script_path"])
-            fixture_path = (
-                repo_path_to_copy(repo, app_dir, plan["fixture_path"])
-                if plan["fixture_path"] is not None
-                else None
-            )
+            try:
+                copy_repo_to(repo, app_dir)
+            except SetupError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
 
-            fixture_json = None
-            if fixture_path is not None:
-                # Launched the same way as the app itself: suspended,
-                # assigned to the job, then resumed, so the fixture can never
-                # run a single instruction outside the job and can never
-                # outlive it. Its stdout/stderr go straight to files rather
-                # than pipes, since a pipe nobody is reading from can fill up
-                # and stall the fixture.
-                stdout_log = run_dir / "fixture_stdout.log"
-                stderr_log = run_dir / "fixture_stderr.log"
-                out_fd, out_handle = open_inheritable_log_handle(stdout_log)
-                err_fd, err_handle = open_inheritable_log_handle(stderr_log)
-                try:
-                    _fixture_pid, fixture_h_process = launch_suspended_in_job(
-                        job,
-                        [interpreter, str(fixture_path)],
-                        app_dir,
-                        fixture_env(os.environ, run_dir, app_dir),
-                        stdout_handle=out_handle,
-                        stderr_handle=err_handle,
-                    )
-                finally:
-                    os.close(out_fd)
-                    os.close(err_fd)
-                all_h_procs.append(fixture_h_process)
-                fixture_json = read_first_json_line(stdout_log, LAUNCH_TIMEOUT_S)
+            try:
+                port = find_free_port()
+                job = create_job_with_kill_on_close()
 
-            env = base_child_env(os.environ, run_dir)
-            env["QTWEBENGINE_REMOTE_DEBUGGING"] = str(port)
+                entry_path = repo_path_to_copy(repo, app_dir, plan["entry_path"])
+                script_path = repo_path_to_copy(repo, app_dir, plan["script_path"])
+                fixture_path = (
+                    repo_path_to_copy(repo, app_dir, plan["fixture_path"])
+                    if plan["fixture_path"] is not None
+                    else None
+                )
 
-            pid, h_process = launch_suspended_in_job(job, [interpreter, str(entry_path)], app_dir, env)
-            entry_h_procs.append(h_process)
-            all_h_procs.append(h_process)
+                fixture_json = None
+                if fixture_path is not None:
+                    # Launched the same way as the app itself: suspended,
+                    # assigned to the job, then resumed, so the fixture can never
+                    # run a single instruction outside the job and can never
+                    # outlive it. Its stdout/stderr go straight to files rather
+                    # than pipes, since a pipe nobody is reading from can fill up
+                    # and stall the fixture.
+                    stdout_log = run_dir / "fixture_stdout.log"
+                    stderr_log = run_dir / "fixture_stderr.log"
+                    out_fd, out_handle = open_inheritable_log_handle(stdout_log)
+                    err_fd, err_handle = open_inheritable_log_handle(stderr_log)
+                    try:
+                        _fixture_pid, fixture_h_process = launch_suspended_in_job(
+                            job,
+                            [interpreter, str(fixture_path)],
+                            app_dir,
+                            fixture_env(os.environ, run_dir, app_dir),
+                            stdout_handle=out_handle,
+                            stderr_handle=err_handle,
+                        )
+                    finally:
+                        os.close(out_fd)
+                        os.close(err_fd)
+                    all_h_procs.append(fixture_h_process)
+                    fixture_json = read_first_json_line(stdout_log, LAUNCH_TIMEOUT_S)
 
-            # The debug port is opened by QtWebEngineProcess.exe, a child the
-            # app spawns after launch, not by the entry script's own PID. A
-            # child of a job-assigned process joins the same job
-            # automatically, so "owned by this run" means "currently a
-            # member of the job", read fresh each time: get_job_pids(job),
-            # not a fixed set collected at launch.
-            def listener_ready():
-                output = run_netstat()
-                ok, _reason = verify_listener(port, output, get_job_pids(job))
-                return output if ok else None
+                env = base_child_env(os.environ, run_dir)
+                env["QTWEBENGINE_REMOTE_DEBUGGING"] = str(port)
 
-            netstat_output = _wait_for(listener_ready, LAUNCH_TIMEOUT_S)
-            if netstat_output is None:
-                output = run_netstat()
-                ok, reason = verify_listener(port, output, get_job_pids(job))
-                raise SetupError(f"debug port never came up cleanly: {reason}")
+                pid, h_process = launch_suspended_in_job(job, [interpreter, str(entry_path)], app_dir, env)
+                entry_h_procs.append(h_process)
+                all_h_procs.append(h_process)
 
-            target = _wait_for_page_target(port, plan["page_url_contains"], LAUNCH_TIMEOUT_S)
-            if target is None:
-                raise SetupError("no matching CDP page target appeared in time")
+                # The debug port is opened by QtWebEngineProcess.exe, a child the
+                # app spawns after launch, not by the entry script's own PID. A
+                # child of a job-assigned process joins the same job
+                # automatically, so "owned by this run" means "currently a
+                # member of the job", read fresh each time: get_job_pids(job),
+                # not a fixed set collected at launch.
+                def listener_ready():
+                    output = run_netstat()
+                    ok, _reason = verify_listener(port, output, get_job_pids(job))
+                    return output if ok else None
 
-            timeout_ms = plan["timeout_s"] * 1000
+                netstat_output = _wait_for(listener_ready, LAUNCH_TIMEOUT_S)
+                if netstat_output is None:
+                    output = run_netstat()
+                    ok, reason = verify_listener(port, output, get_job_pids(job))
+                    raise SetupError(f"debug port never came up cleanly: {reason}")
 
-            results_path = run_dir / "results.json"
-            job_request = {
-                "webSocketDebuggerUrl": target["webSocketDebuggerUrl"],
-                "scenarioPath": str(script_path),
-                "outDir": str(run_dir),
-                "fixture": fixture_json,
-                "timeoutMs": timeout_ms,
-            }
-            request_path = run_dir / "cdp_request.json"
-            request_path.write_text(json.dumps(job_request), encoding="utf-8")
+                target = _wait_for_page_target(port, plan["page_url_contains"], LAUNCH_TIMEOUT_S)
+                if target is None:
+                    raise SetupError("no matching CDP page target appeared in time")
 
-            node_log_path = run_dir / "node.log"
-            node_result = subprocess.run(
-                ["node", str(HERE / "cdp.mjs"), str(request_path)],
-                capture_output=True,
-                text=True,
-                timeout=plan["timeout_s"] + 30,
-            )
-            node_log_path.write_text(node_result.stdout + "\n" + node_result.stderr, encoding="utf-8")
+                timeout_ms = plan["timeout_s"] * 1000
 
-            results = {"checks": [], "error": None}
-            if results_path.is_file():
-                try:
-                    results = json.loads(results_path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    results["error"] = "results.json was not valid JSON"
-            elif node_result.returncode != 0:
-                results["error"] = f"cdp.mjs exited {node_result.returncode} before writing results"
+                results_path = run_dir / "results.json"
+                job_request = {
+                    "webSocketDebuggerUrl": target["webSocketDebuggerUrl"],
+                    "scenarioPath": str(script_path),
+                    "outDir": str(run_dir),
+                    "fixture": fixture_json,
+                    "timeoutMs": timeout_ms,
+                }
 
-            checks = results.get("checks", [])
-            for c in checks:
-                status = "PASS" if c.get("pass") else "FAIL"
-                line = f"{status} {c.get('name')}"
-                if not c.get("pass") and c.get("detail"):
-                    line += f"  [{c['detail']}]"
-                print(line)
-            if results.get("error"):
-                print(f"SCENARIO ERROR: {results['error']}")
+                # The request goes to Node on stdin, not through a file: it
+                # carries a trusted websocket URL and paths that never need to
+                # sit on disk where something else could read or race them.
+                node_log_path = run_dir / "node.log"
+                node_result = subprocess.run(
+                    ["node", str(HERE / "cdp.mjs")],
+                    input=json.dumps(job_request),
+                    capture_output=True,
+                    text=True,
+                    timeout=plan["timeout_s"] + 30,
+                    env=base_child_env(os.environ, run_dir),
+                )
+                write_exclusive_text(node_log_path, node_result.stdout + "\n" + node_result.stderr)
 
-            passed = sum(1 for c in checks if c.get("pass"))
-            print(f"{passed}/{len(checks)} checks passed")
+                results = collect_scenario_results(results_path, node_result.returncode)
 
-            job_pids = get_job_pids(job)
-            hwnd = find_window_for_pids(job_pids, plan["window_title"])
-            if hwnd is not None:
-                capture_ok = capture_whole_window(hwnd, run_dir / "window.png")
-            else:
-                print("FAIL could not find the app window to capture")
-                capture_ok = False
+                checks = results.get("checks", [])
+                for c in checks:
+                    status = "PASS" if c.get("pass") else "FAIL"
+                    line = f"{status} {c.get('name')}"
+                    if not c.get("pass") and c.get("detail"):
+                        line += f"  [{c['detail']}]"
+                    print(line)
+                if results.get("error"):
+                    print(f"SCENARIO ERROR: {results['error']}")
 
-            teardown = _close_app_and_verify(job, job_pids, entry_h_procs, plan["window_title"], port, hwnd)
-            job = None  # _close_app_and_verify always closes the job before returning
-            if teardown["cleanup_verified"]:
-                write_teardown_marker(run_dir)
+                passed = sum(1 for c in checks if c.get("pass"))
+                print(f"{passed}/{len(checks)} checks passed")
 
-            checks_ok = bool(checks) and passed == len(checks) and not results.get("error")
-            return compute_exit_code(teardown["cleanup_verified"], checks_ok, capture_ok, teardown["ok"])
+                job_pids = get_job_pids(job)
+                hwnd = find_window_for_pids(job_pids, plan["window_title"])
+                if hwnd is not None:
+                    capture_ok = capture_whole_window(hwnd, run_dir / "window.png", run_dir)
+                else:
+                    print("FAIL could not find the app window to capture")
+                    capture_ok = False
 
+                teardown = _close_app_and_verify(job, job_pids, entry_h_procs, plan["window_title"], port, hwnd)
+                job = None  # _close_app_and_verify always closes the job before returning
+                if teardown["cleanup_verified"]:
+                    write_teardown_marker(run_dir)
+
+                checks_ok = bool(checks) and passed == len(checks) and not results.get("error")
+                return compute_exit_code(teardown["cleanup_verified"], checks_ok, capture_ok, teardown["ok"])
+
+            except Exception as exc:
+                if isinstance(exc, SetupError):
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                else:
+                    print(f"ERROR: {exc!r}", file=sys.stderr)
+                job, cleanup_verified = _report_cleanup_after_error(job, port)
+                if cleanup_verified:
+                    write_teardown_marker(run_dir)
+                return 2
+            finally:
+                _cleanup(job, all_h_procs)
         except Exception as exc:
             if isinstance(exc, SetupError):
                 print(f"ERROR: {exc}", file=sys.stderr)
@@ -1053,9 +1470,9 @@ def main(argv: list[str]) -> int:
                 write_teardown_marker(run_dir)
             return 2
         finally:
-            _cleanup(job, all_h_procs)
+            release_run_lock(lock_fd)
     finally:
-        release_run_lock(lock_fd)
+        _close_win_handle(run_pin_handle)
 
 
 def _wait_for_page_target(port: int, page_url_contains: str | None, timeout_s: float) -> dict | None:
@@ -1190,34 +1607,6 @@ def _cleanup(job, h_procs: list) -> None:
 # every safety check below holds.
 # --------------------------------------------------------------------------
 
-def _delete_dir_tree_no_follow(root: Path) -> None:
-    """Removes root and everything under it, bottom-up, never following a
-    symlink or junction found inside: such an entry is removed as the link
-    itself (os.rmdir on a reparse point removes only the link, not its
-    target's contents), not recursed into."""
-
-    def _remove_contents(d: Path) -> None:
-        for entry in os.scandir(d):
-            p = Path(entry.path)
-            if entry.is_dir(follow_symlinks=False) and not is_reparse_point(p):
-                _remove_contents(p)
-                os.rmdir(p)
-            elif entry.is_dir(follow_symlinks=False):
-                os.rmdir(p)  # reparse point (symlink/junction): remove the link only
-            else:
-                # chmod follows a link, so a file symlink is removed as-is
-                # rather than clearing read-only on its target.
-                if not is_reparse_point(p):
-                    try:
-                        os.chmod(p, 0o666)
-                    except OSError:
-                        pass
-                os.remove(p)
-
-    _remove_contents(root)
-    os.rmdir(root)
-
-
 def cmd_cleanup(run_dir_arg: str) -> int:
     path = Path(run_dir_arg)
 
@@ -1227,19 +1616,28 @@ def cmd_cleanup(run_dir_arg: str) -> int:
 
     if not path.exists():
         return refuse("path does not exist")
-    if is_reparse_point(path):
-        return refuse("path is a symlink/reparse point")
 
     temp_root = Path(tempfile.gettempdir()).resolve()
 
+    # Pin the root first and hold it through the whole delete: nothing (same
+    # user) can rename, move, or replace it out from under us once this
+    # handle is open. pin_directory itself refuses (SetupError) if the path
+    # is not a plain directory, including if it is itself a reparse point.
+    try:
+        root_handle = pin_directory(path, access=DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+    except SetupError as exc:
+        return refuse(str(exc))
+
+    canonical = path.resolve()
+
     def identity_ok() -> str | None:
-        """Returns None if every identity check passes, else a reason."""
-        if is_reparse_point(path):
-            return "path is a symlink/reparse point"
-        canonical = path.resolve()
+        """Returns None if every marker/name/lock check passes, else a
+        reason. The root's directory-ness and reparse status are already
+        settled by the pin above; this only checks the parts a pin does not
+        cover."""
         if canonical.parent != temp_root:
             return f"parent is not {temp_root}"
-        if not canonical.name.startswith("ui-drive-"):
+        if not RUN_DIR_NAME_RE.match(canonical.name):
             return "folder name does not look like a ui_drive run"
         marker_path = canonical / RUN_MARKER_NAME
         if not marker_path.is_file():
@@ -1256,24 +1654,28 @@ def cmd_cleanup(run_dir_arg: str) -> int:
 
     reason = identity_ok()
     if reason:
+        _close_win_handle(root_handle)
         return refuse(reason)
 
-    canonical = path.resolve()
     try:
-        lock_fd = acquire_run_lock(canonical)
+        lock_fd = acquire_run_lock(canonical, create=False)
     except SetupError as exc:
+        _close_win_handle(root_handle)
         return refuse(f"could not lock run folder (a run may still be using it): {exc}")
     release_run_lock(lock_fd)
 
     # Re-check immediately before deleting: the checks above, the lock
-    # attempt, and the delete itself are not one atomic operation.
+    # attempt, and the delete itself are not one atomic operation. The root
+    # pin held throughout means the root itself cannot have been swapped;
+    # this only re-reads the markers.
     reason = identity_ok()
     if reason:
+        _close_win_handle(root_handle)
         return refuse(reason)
 
     try:
-        _delete_dir_tree_no_follow(canonical)
-    except OSError as exc:
+        _delete_tree_via_handles(root_handle, str(canonical))  # always closes root_handle
+    except (OSError, SetupError) as exc:
         return refuse(f"delete failed: {exc}")
 
     if canonical.exists():

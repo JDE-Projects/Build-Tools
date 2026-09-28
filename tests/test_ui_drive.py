@@ -6,6 +6,9 @@ at import time), so these tests are skipped anywhere else.
 
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -397,6 +400,54 @@ def test_compute_exit_code_unverified_cleanup_outranks_check_failure():
     assert drive.compute_exit_code(False, False, False, False) == 2
 
 
+def test_collect_scenario_results_rejects_node_failure_before_reading_results(tmp_path):
+    results_path = tmp_path / "results.json"
+    results_path.write_text(
+        json.dumps({"checks": [{"name": "planted pass", "pass": True}], "error": None}),
+        encoding="utf-8",
+    )
+
+    results = drive.collect_scenario_results(results_path, node_returncode=1)
+
+    assert results["checks"] == []
+    assert results["error"] == "cdp.mjs exited 1 before writing results"
+
+
+@pytest.mark.parametrize("name", ["tmp", "app"])
+def test_prepare_run_subdirectories_refuses_existing_file(tmp_path, name):
+    run_dir = tmp_path / VALID_RUN_NAME
+    run_dir.mkdir()
+    (run_dir / name).write_text("planted", encoding="utf-8")
+
+    with pytest.raises(drive.SetupError, match=f"could not create.*{name}"):
+        drive.prepare_run_subdirectories(run_dir)
+
+
+@pytest.mark.parametrize("name", ["tmp", "app"])
+def test_main_returns_clean_refusal_when_setup_subdirectory_exists(tmp_path, monkeypatch, name):
+    repo = make_repo(tmp_path)
+    manifest_path = repo / "tools" / "ui_check" / "ui_drive.json"
+    manifest_path.write_text(json.dumps(good_manifest()), encoding="utf-8")
+    run_dir = tmp_path / VALID_RUN_NAME
+    run_dir.mkdir()
+    (run_dir / name).write_text("planted", encoding="utf-8")
+    run_pin = drive.pin_directory(run_dir)
+
+    monkeypatch.setattr(drive, "mutex_exists", lambda mutex: False)
+    monkeypatch.setattr(drive, "create_run_dir", lambda: (run_dir, run_pin))
+
+    assert drive.main([str(repo), "smoke"]) == 2
+
+
+def test_clear_readonly_via_handle_refuses_attribute_update_failure(monkeypatch):
+    monkeypatch.setattr(drive, "_handle_attributes", lambda handle: (drive.FILE_ATTRIBUTE_READONLY, 0))
+    monkeypatch.setattr(drive.kernel32, "SetFileInformationByHandle", lambda *args: False)
+    monkeypatch.setattr(drive.ctypes, "get_last_error", lambda: 5)
+
+    with pytest.raises(drive.SetupError, match="SetFileInformationByHandle failed"):
+        drive._clear_readonly_via_handle(123)
+
+
 # --------------------------------------------------------------------------
 # copy_repo_to: the throwaway copy of the app repo
 # --------------------------------------------------------------------------
@@ -506,7 +557,10 @@ def test_copy_repo_to_rejects_non_git_repo(tmp_path):
 # drive.py cleanup <run folder>
 # --------------------------------------------------------------------------
 
-def make_fake_run_folder(temp_root: Path, name: str = "ui-drive-abc123", verified: bool = True) -> Path:
+VALID_RUN_NAME = "ui-drive-" + "a" * 32
+
+
+def make_fake_run_folder(temp_root: Path, name: str = VALID_RUN_NAME, verified: bool = True) -> Path:
     run_dir = temp_root / name
     run_dir.mkdir()
     marker = {"run_id": "abc123", "path": str(run_dir.resolve())}
@@ -619,8 +673,6 @@ def test_cleanup_refuses_when_path_is_a_symlink(tmp_path, monkeypatch):
 
 
 def test_cleanup_refuses_when_lock_is_held(tmp_path, monkeypatch):
-    import msvcrt
-
     temp_root = tmp_path / "faketemp"
     temp_root.mkdir()
     monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
@@ -632,6 +684,46 @@ def test_cleanup_refuses_when_lock_is_held(tmp_path, monkeypatch):
         assert run_dir.exists()
     finally:
         drive.release_run_lock(lock_fd)
+
+
+def test_cleanup_lock_race_cannot_overwrite_swapped_symlink_target(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    run_dir = make_fake_run_folder(temp_root)
+    lock_path = run_dir / drive.LOCK_FILE_NAME
+    lock_path.write_bytes(b"lock")
+    external_target = tmp_path / "external.txt"
+    external_target.write_bytes(b"external contents")
+
+    original_attributes = drive._handle_attributes
+    swapped = False
+    swap_blocked = False
+
+    def swap_after_probe(handle):
+        nonlocal swapped, swap_blocked
+        attrs = original_attributes(handle)
+        if not swapped:
+            swapped = True
+            try:
+                lock_path.unlink()
+            except PermissionError:
+                swap_blocked = True
+                return attrs
+            try:
+                lock_path.symlink_to(external_target)
+            except OSError:
+                pytest.skip("file symlinks are not available in this environment (needs a privilege this account lacks)")
+        return attrs
+
+    monkeypatch.setattr(drive, "_handle_attributes", swap_after_probe)
+    try:
+        fd = drive.acquire_run_lock(run_dir, create=False)
+    finally:
+        if "fd" in locals():
+            drive.release_run_lock(fd)
+
+    assert external_target.read_bytes() == b"external contents"
+    assert swap_blocked
 
 
 def test_cleanup_removes_junction_without_deleting_its_target(tmp_path, monkeypatch):
@@ -660,3 +752,215 @@ def test_cleanup_removes_junction_without_deleting_its_target(tmp_path, monkeypa
     assert not run_dir.exists()
     assert target.is_dir()
     assert (target / "keep.txt").read_text(encoding="utf-8") == "keep me"
+
+
+def test_cleanup_refuses_when_root_itself_is_a_junction(tmp_path, monkeypatch):
+    import subprocess
+
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+
+    target = tmp_path / "junction_root_target"
+    target.mkdir()
+    marker = {"run_id": "x", "path": str((temp_root / VALID_RUN_NAME).resolve())}
+    (target / drive.RUN_MARKER_NAME).write_text(json.dumps(marker), encoding="utf-8")
+    (target / drive.TEARDOWN_MARKER_NAME).write_text("", encoding="utf-8")
+
+    junction = temp_root / VALID_RUN_NAME
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"junction creation is not available in this environment: {result.stderr}")
+
+    code = drive.main(["cleanup", str(junction)])
+    assert code == 2
+    assert target.exists()
+    assert (target / drive.RUN_MARKER_NAME).is_file()
+
+
+def test_cleanup_removes_file_symlink_without_deleting_its_target(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    run_dir = make_fake_run_folder(temp_root)
+
+    target_dir = tmp_path / "symlink_target_dir"
+    target_dir.mkdir()
+    target_file = target_dir / "keep.txt"
+    target_file.write_text("keep me too", encoding="utf-8")
+
+    link = run_dir / "linked.txt"
+    try:
+        link.symlink_to(target_file)
+    except OSError:
+        pytest.skip("file symlinks are not available in this environment (needs a privilege this account lacks)")
+
+    code = drive.main(["cleanup", str(run_dir)])
+    assert code == 0
+    assert not run_dir.exists()
+    assert target_file.read_text(encoding="utf-8") == "keep me too"
+
+    import shutil as _shutil
+
+    _shutil.rmtree(target_dir)
+
+
+# --------------------------------------------------------------------------
+# exclusive_create: files the driver writes must never silently overwrite
+# an existing file or a link planted at that name
+# --------------------------------------------------------------------------
+
+def test_exclusive_create_refuses_existing_file(tmp_path):
+    path = tmp_path / "existing.txt"
+    path.write_text("already here", encoding="utf-8")
+    with pytest.raises(drive.SetupError, match="existing"):
+        drive.exclusive_create(path)
+    assert path.read_text(encoding="utf-8") == "already here"
+
+
+def test_exclusive_create_refuses_existing_link(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("target contents", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks are not available in this environment")
+    with pytest.raises(drive.SetupError, match="existing"):
+        drive.exclusive_create(link)
+    assert target.read_text(encoding="utf-8") == "target contents"
+
+
+def test_exclusive_create_succeeds_for_a_new_path(tmp_path):
+    path = tmp_path / "new.txt"
+    fd = drive.exclusive_create(path)
+    try:
+        import os as _os
+
+        _os.write(fd, b"hello")
+    finally:
+        import os as _os
+
+        _os.close(fd)
+    assert path.read_text(encoding="utf-8") == "hello"
+
+
+# --------------------------------------------------------------------------
+# copy_repo_to: destination escape and a pre-planted junction in the
+# destination are both refused
+# --------------------------------------------------------------------------
+
+def test_copy_repo_to_refuses_dotdot_relative_path(tmp_path, monkeypatch):
+    _root, sub = make_test_git_repo(tmp_path)
+    (sub.parent / "outside.txt").write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(drive, "list_repo_files", lambda repo: ["../outside.txt"])
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(drive.SetupError, match="outside"):
+        drive.copy_repo_to(sub, dest)
+
+
+def test_copy_repo_to_refuses_preplanted_junction_in_destination(tmp_path, monkeypatch):
+    import subprocess
+
+    _root, sub = make_test_git_repo(tmp_path)
+    (sub / "sub").mkdir()
+    (sub / "sub" / "tracked2.txt").write_text("tracked2", encoding="utf-8")
+    _git(sub, "add", "-A")
+    _git(sub, "commit", "-q", "-m", "add sub")
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    junction = dest / "sub"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(elsewhere)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"junction creation is not available in this environment: {result.stderr}")
+
+    # A junction resolves through to its target, so this is refused either
+    # as a destination escape (the target sits outside dest) or, if the
+    # target happened to sit inside dest, as an unexpected reparse point;
+    # either way, nothing gets written through it.
+    with pytest.raises(drive.SetupError, match="outside the destination|reparse point"):
+        drive.copy_repo_to(sub, dest)
+    assert not (elsewhere / "tracked2.txt").exists()
+
+
+# --------------------------------------------------------------------------
+# cdp.mjs screenshot-name validation (exercised through node, not pytest,
+# since it is JS logic)
+# --------------------------------------------------------------------------
+
+def test_cdp_screenshot_name_validation():
+    import shutil as _shutil
+    import subprocess
+
+    node = _shutil.which("node")
+    if not node:
+        pytest.skip("node is not on PATH")
+
+    cdp_url = (REPO_ROOT / "ui_drive" / "cdp.mjs").as_uri()
+    script = (
+        f"import('{cdp_url}').then(m => {{"
+        "const cases = [['good_name-1', true], ['bad/name', false], ['', false], "
+        "['a'.repeat(64), true], ['a'.repeat(65), false]];"
+        "const failed = cases.filter(([name, expected]) => m.isValidScreenshotName(name) !== expected);"
+        "if (failed.length) { console.error(JSON.stringify(failed)); process.exit(1); }"
+        "process.exit(0);"
+        "});"
+    )
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("case", "out_dir_name", "temp_name", "error_text"),
+    [
+        ("mismatched-out-dir", "ui-drive-" + "b" * 32, "tmp", "private temp folder"),
+        ("bad-name", "not-a-ui-drive-folder", "tmp", "does not look like"),
+        ("wrong-temp-basename", "ui-drive-" + "c" * 32, "not-tmp", "private temp folder"),
+    ],
+)
+def test_cdp_refuses_invalid_out_dir_before_connecting(tmp_path, case, out_dir_name, temp_name, error_text):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not on PATH")
+
+    run_dir = tmp_path / out_dir_name
+    run_dir.mkdir()
+    temp_parent = run_dir
+    if case == "mismatched-out-dir":
+        temp_parent = tmp_path / ("ui-drive-" + "d" * 32)
+        temp_parent.mkdir()
+    temp_dir = temp_parent / temp_name
+    temp_dir.mkdir()
+    request = {
+        "webSocketDebuggerUrl": "ws://127.0.0.1:1/devtools/page/not-connected",
+        "scenarioPath": str(tmp_path / "scenario.mjs"),
+        "outDir": str(run_dir),
+    }
+    env = os.environ.copy()
+    env["TEMP"] = str(temp_dir)
+    env["TMP"] = str(temp_dir)
+
+    result = subprocess.run(
+        [node, str(REPO_ROOT / "ui_drive" / "cdp.mjs")],
+        input=json.dumps(request),
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert error_text in result.stderr
+    assert not (run_dir / "results.json").exists()

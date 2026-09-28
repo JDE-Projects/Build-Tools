@@ -9,15 +9,60 @@
 //
 // Zero npm dependencies: Node 22+ provides fetch and WebSocket built in.
 //
-// Usage: node cdp.mjs <request.json>
+// Usage: node cdp.mjs < request.json
+// The request (the same JSON object drive.py used to write to
+// cdp_request.json) is read from stdin instead of a file, so nothing this
+// process needs ever has to sit on disk where another process could read
+// or race it.
 
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, dirname, basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { tmpdir } from "node:os";
 
 function fail(message) {
   console.error(`ERROR: ${message}`);
   process.exit(1);
+}
+
+// Matches drive.py's RUN_DIR_NAME_RE: the run folder name format is this
+// tool's own, not something to take on trust from a request.
+const RUN_DIR_NAME_RE = /^ui-drive-[0-9a-f]{32}$/;
+
+// A scenario picks its own screenshot name; keep it to a small safe
+// character set so it can never become a path (no slashes, dots, or drive
+// letters) before it is joined onto outDir.
+const SCREENSHOT_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function isValidScreenshotName(name) {
+  return typeof name === "string" && SCREENSHOT_NAME_RE.test(name);
+}
+
+// Independently checks that outDir really is this run's folder rather than
+// trusting whatever path the request carries: drive.py launches this process
+// with TEMP set to <run folder>\tmp, so outDir must be the folder holding
+// that private temp folder, and must be named the way drive.py names one.
+function validateOutDir(outDir) {
+  if (typeof outDir !== "string" || !outDir) fail("request is missing outDir");
+  const resolved = resolve(outDir);
+  const name = basename(resolved);
+  const privateTemp = resolve(tmpdir());
+  if (basename(privateTemp).toLowerCase() !== "tmp" || dirname(privateTemp).toLowerCase() !== resolved.toLowerCase()) {
+    fail(`outDir is not the run folder holding this process's private temp folder: ${resolved}`);
+  }
+  if (!RUN_DIR_NAME_RE.test(name)) {
+    fail(`outDir does not look like a ui_drive run folder: ${name}`);
+  }
+  return resolved;
+}
+
+function readStdin() {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const chunks = [];
+    process.stdin.on("data", (chunk) => chunks.push(chunk));
+    process.stdin.on("end", () => resolvePromise(Buffer.concat(chunks).toString("utf-8")));
+    process.stdin.on("error", rejectPromise);
+  });
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -303,20 +348,27 @@ class Runner {
   // Waits settleMs first so a CSS transition (a theme fade, for example) has
   // finished; a shot taken mid-fade looks like a styling bug that isn't there.
   async screenshot(name, settleMs = 600) {
+    if (!isValidScreenshotName(name)) {
+      throw new Error(`screenshot(): invalid name ${JSON.stringify(name)}`);
+    }
     if (settleMs > 0) await sleep(settleMs);
     const { data } = await this.devtools.send("Page.captureScreenshot", { format: "png" });
     const path = join(this.outDir, `${name}.png`);
-    await writeFile(path, Buffer.from(data, "base64"));
+    await writeFile(path, Buffer.from(data, "base64"), { flag: "wx" });
     return path;
   }
 }
 
 async function main() {
-  const requestPath = process.argv[2];
-  if (!requestPath) fail("usage: node cdp.mjs <request.json>");
-
-  const request = JSON.parse(await (await import("node:fs/promises")).readFile(requestPath, "utf-8"));
-  const { webSocketDebuggerUrl, scenarioPath, outDir, fixture, timeoutMs } = request;
+  const raw = await readStdin();
+  let request;
+  try {
+    request = JSON.parse(raw);
+  } catch (err) {
+    fail(`request on stdin was not valid JSON: ${err.message}`);
+  }
+  const { webSocketDebuggerUrl, scenarioPath, fixture, timeoutMs } = request;
+  const outDir = validateOutDir(request.outDir);
 
   const results = { checks: [], error: null };
   const effectiveTimeoutMs = timeoutMs ?? 30000;
@@ -375,7 +427,7 @@ async function main() {
   // real results and worth keeping, not just the ones from a clean finish.
   if (runner) results.checks = runner.checks;
 
-  await writeFile(join(outDir, "results.json"), JSON.stringify(results, null, 2));
+  await writeFile(join(outDir, "results.json"), JSON.stringify(results, null, 2), { flag: "wx" });
   if (results.error) {
     console.error(results.error);
     process.exit(1);
@@ -383,4 +435,8 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((err) => fail(err.stack || err.message));
+// Only runs the scenario when this file is executed directly (`node
+// cdp.mjs`), not when a test imports it just to reach isValidScreenshotName.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((err) => fail(err.stack || err.message));
+}
