@@ -1,0 +1,12 @@
+{
+  "entry": "app.py",
+  "mutex": "UiDrive_Example_SingleInstance",
+  "window_title": "ui_drive example",
+  "scenarios": {
+    "smoke": {
+      "script": "tools/ui_check/smoke.js",
+      "fixture": "tools/ui_check/fixture.py",
+      "timeout_s": 30
+    }
+  }
+}
