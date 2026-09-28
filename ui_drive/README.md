@@ -21,6 +21,7 @@ real text, and reading the page back through the app's real bridge
   extra packages to install)
 - Node 22 or later on PATH (built-in `fetch` and `WebSocket`, no npm
   packages)
+- `git` on PATH, to build the throwaway copy of the app repo a run works from
 - PowerShell (already on Windows), for the window screenshot step
 
 ## Usage
@@ -35,22 +36,86 @@ Example, using this repo's worked example:
 "path\to\Simple SFTP Client\.venv\Scripts\python.exe" ui_drive\drive.py ui_drive\example smoke
 ```
 
+To remove a run folder once you're done looking at it:
+
+```
+python ui_drive\drive.py cleanup <run folder>
+```
+
 The app must not already be running: if its single-instance mutex is held,
 `drive.py` refuses to start (exit code 2) rather than touch the user's open
 copy.
 
-Everything the run produces goes into a fresh folder under `%TEMP%`
-(`ui-drive-<random>`), printed at the start of the run. It holds:
+The app repo is only ever read. Every run starts by copying it into a fresh
+folder under `%TEMP%` (`ui-drive-<random>`, printed at the start of the run),
+and everything the run does from then on, launching the app, running the
+fixture, and writing settings, databases, sample data, logs, and
+screenshots, happens inside that one folder. The run folder holds:
 
+- `app\`, the throwaway copy of the app repo the app and fixture actually run
+  from
+- `tmp\`, the private `TEMP`/`TMP` folder handed to the app and fixture, so
+  anything either writes to "the temp folder" lands here instead of the
+  user's real one
 - `results.json`, the scenario's checks in machine-readable form
 - any screenshots the scenario or the window capture step took
 - on any failure, the app's own stdout/stderr and the Node log, so a broken
   run can be diagnosed without repeating it
+- `.ui-drive-run`, a marker written at creation holding the run's ID and its
+  own canonical path
+- `.ui-drive.lock`, held exclusively by `drive.py` for the whole run
+- `.teardown-complete`, written only once the app's job has been closed and
+  cleanup (no leftover process, the debug port closed) has been verified
 
-Exit code is 0 only when every check passed and cleanup was verified, 1 if
-any check failed, and 2 on a setup or cleanup problem (bad manifest, app
-already running, the debug port never came up, cleanup left something
-behind).
+### The copy
+
+The file list is `git`'s: tracked files plus untracked-but-not-ignored ones,
+taken from the working tree, not from a commit. A listed path that no longer
+exists on disk (a tracked file since deleted) is skipped. Any entry that is a
+symlink or other reparse point, or whose resolved path falls outside the
+repo, makes `drive.py` refuse to start at all (exit code 2), before it
+launches anything. The app repo can itself be a subfolder of a larger git
+repo (`ui_drive/example` in this repo is); the copy still works, since the
+file list is taken relative to the app repo, not the git repo's top level.
+If the app repo is not inside a git work tree at all, `drive.py` refuses with
+a clear message.
+
+The manifest (`tools/ui_check/ui_drive.json`) is still read and validated
+against the real repo, exactly as before. The entry script and the
+scenario's `script` and `fixture` paths, once validated, are then resolved
+against the copy instead, so the app, the scenario, and the fixture all run
+from inside the run folder.
+
+### Child process environment
+
+The app and its fixture both get `PYTHONDONTWRITEBYTECODE=1` and a private
+`TEMP`/`TMP` pointing at `<run folder>\tmp`. The fixture additionally gets
+`UI_DRIVE_OUT_DIR` (the run folder, unchanged from before) and
+`UI_DRIVE_APP_DIR` (the copy), so a fixture that needs to can pre-place
+sample data, a database file, for example, next to the copied app before it
+launches; the fixture already runs before the app does.
+
+### Cleanup
+
+`drive.py cleanup <run folder>` deletes one run folder. It never kills a
+process: only `drive.py`'s own run does that, through the job object. It
+refuses (exit code 2, with a plain message) unless all of these hold: the
+path is not a reparse point; its canonical parent is `%TEMP%`; its name
+matches `ui-drive-*`; `.ui-drive-run` exists and its recorded path matches
+the folder; `.teardown-complete` exists; and the lock file can be locked
+exclusively (nothing, meaning no live `drive.py`, is still holding it).
+Deletion never follows a symlink or junction found inside the folder: such
+an entry is removed as the link itself, its target is left untouched. Exit
+code 0 means the folder was deleted and verified gone.
+
+Exit code for a run is 0 only when every check passed and cleanup was
+verified, 1 when cleanup was verified but a check failed, and 2 whenever
+cleanup could not be verified (this always wins over a check result) or any
+setup problem came up first (bad manifest, app already running, `git`
+missing or the repo not a work tree, the debug port never came up, a Node or
+process-launch failure, or anything else unexpected). Every exception
+`drive.py` can raise is caught, reported, and run through the same verified
+teardown before the process exits, so a crash never skips cleanup.
 
 ## The manifest: `tools/ui_check/ui_drive.json`
 
@@ -168,3 +233,11 @@ development machine, not a security boundary: never leave a run going
 unattended on a shared or untrusted machine, and never point this at a
 built, installed, or production copy of an app. Runs are from source only,
 for exactly this reason.
+
+The app runs from the copy as the same Windows user running `drive.py`, with
+the same permissions that user has everywhere else: the copy is a fresh
+folder the app cannot tell apart from a real install, not a sandbox. Nothing
+here stops the app from reading or writing outside its own folder if its own
+code does that. Before pointing this at a new app, check what the app writes
+and where, so a run's list of side effects is known ahead of time rather than
+found by surprise.

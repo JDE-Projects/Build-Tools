@@ -340,8 +340,10 @@ def test_read_first_json_line_rejects_empty_first_line(tmp_path):
 def test_fixture_env_adds_out_dir_without_mutating_base(tmp_path):
     base = {"PATH": "C:/somewhere"}
     out_dir = tmp_path / "out"
-    env = drive.fixture_env(base, out_dir)
+    app_dir = out_dir / "app"
+    env = drive.fixture_env(base, out_dir, app_dir)
     assert env["UI_DRIVE_OUT_DIR"] == str(out_dir)
+    assert env["UI_DRIVE_APP_DIR"] == str(app_dir)
     assert env["PATH"] == "C:/somewhere"
     assert "UI_DRIVE_OUT_DIR" not in base
 
@@ -349,5 +351,312 @@ def test_fixture_env_adds_out_dir_without_mutating_base(tmp_path):
 def test_fixture_env_overrides_existing_var(tmp_path):
     base = {"UI_DRIVE_OUT_DIR": "stale"}
     out_dir = tmp_path / "out"
-    env = drive.fixture_env(base, out_dir)
+    app_dir = out_dir / "app"
+    env = drive.fixture_env(base, out_dir, app_dir)
     assert env["UI_DRIVE_OUT_DIR"] == str(out_dir)
+
+
+def test_fixture_env_includes_base_child_env(tmp_path):
+    out_dir = tmp_path / "out"
+    app_dir = out_dir / "app"
+    env = drive.fixture_env({}, out_dir, app_dir)
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert env["TEMP"] == str(out_dir / "tmp")
+    assert env["TMP"] == str(out_dir / "tmp")
+
+
+def test_base_child_env_adds_expected_vars_without_mutating_base(tmp_path):
+    base = {"PATH": "C:/somewhere"}
+    run_dir = tmp_path / "run"
+    env = drive.base_child_env(base, run_dir)
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert env["TEMP"] == str(run_dir / "tmp")
+    assert env["TMP"] == str(run_dir / "tmp")
+    assert env["PATH"] == "C:/somewhere"
+    assert "PYTHONDONTWRITEBYTECODE" not in base
+
+
+# --------------------------------------------------------------------------
+# Exit code mapping
+# --------------------------------------------------------------------------
+
+def test_compute_exit_code_all_pass():
+    assert drive.compute_exit_code(True, True, True, True) == 0
+
+
+def test_compute_exit_code_check_failure_with_verified_cleanup():
+    assert drive.compute_exit_code(True, False, True, True) == 1
+    assert drive.compute_exit_code(True, True, False, True) == 1
+    assert drive.compute_exit_code(True, True, True, False) == 1
+
+
+def test_compute_exit_code_unverified_cleanup_outranks_check_failure():
+    # Even when every check passed, an unverified cleanup always wins.
+    assert drive.compute_exit_code(False, True, True, True) == 2
+    # And it wins over a check failure too, not just alongside a pass.
+    assert drive.compute_exit_code(False, False, False, False) == 2
+
+
+# --------------------------------------------------------------------------
+# copy_repo_to: the throwaway copy of the app repo
+# --------------------------------------------------------------------------
+
+def _git(repo: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def make_test_git_repo(tmp_path: Path):
+    """A real git repo with a tracked file, a gitignored file, and an
+    untracked-but-not-ignored file, all inside a subfolder ("app") of the
+    repo root, so copy_repo_to can be exercised against a repo that is
+    itself a subfolder of a larger git work tree (as ui_drive/example is)."""
+    root = tmp_path / "gitroot"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test")
+    sub = root / "app"
+    sub.mkdir()
+    (sub / "tracked.txt").write_text("tracked", encoding="utf-8")
+    (sub / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (sub / "ignored.txt").write_text("ignored", encoding="utf-8")
+    (sub / "untracked.txt").write_text("untracked", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    return root, sub
+
+
+def test_copy_repo_to_selects_tracked_and_untracked_not_ignored(tmp_path):
+    _root, sub = make_test_git_repo(tmp_path)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    drive.copy_repo_to(sub, dest)
+    assert (dest / "tracked.txt").read_text(encoding="utf-8") == "tracked"
+    assert (dest / "untracked.txt").read_text(encoding="utf-8") == "untracked"
+    assert (dest / ".gitignore").is_file()
+    assert not (dest / "ignored.txt").exists()
+
+
+def test_copy_repo_to_skips_deleted_tracked_file(tmp_path):
+    _root, sub = make_test_git_repo(tmp_path)
+    (sub / "tracked.txt").unlink()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    drive.copy_repo_to(sub, dest)  # must not raise
+    assert not (dest / "tracked.txt").exists()
+    assert (dest / "untracked.txt").exists()
+
+
+def test_copy_repo_to_refuses_symlink(tmp_path):
+    _root, sub = make_test_git_repo(tmp_path)
+    outside = tmp_path / "outside_target.txt"
+    outside.write_text("secret", encoding="utf-8")
+    link = sub / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are not available in this environment")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(drive.SetupError, match="symlink"):
+        drive.copy_repo_to(sub, dest)
+
+
+def test_copy_repo_to_refuses_path_resolving_outside_repo(tmp_path, monkeypatch):
+    _root, sub = make_test_git_repo(tmp_path)
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "secret.txt").write_text("secret", encoding="utf-8")
+    link_dir = sub / "linked_dir"
+    try:
+        link_dir.symlink_to(outside_dir, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not available in this environment")
+    monkeypatch.setattr(drive, "list_repo_files", lambda repo: ["linked_dir/secret.txt"])
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(drive.SetupError, match="outside"):
+        drive.copy_repo_to(sub, dest)
+
+
+def test_copy_repo_to_works_for_a_subfolder_repo(tmp_path):
+    # make_test_git_repo already puts the "repo" ui_drive is pointed at
+    # (sub) inside a larger git work tree (root); this just asserts that
+    # setup didn't secretly need root to be the repo argument.
+    _root, sub = make_test_git_repo(tmp_path)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    drive.copy_repo_to(sub, dest)
+    assert (dest / "tracked.txt").is_file()
+
+
+def test_copy_repo_to_rejects_non_git_repo(tmp_path):
+    not_a_repo = tmp_path / "plain_folder"
+    not_a_repo.mkdir()
+    (not_a_repo / "file.txt").write_text("x", encoding="utf-8")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(drive.SetupError, match="not inside a git work tree"):
+        drive.copy_repo_to(not_a_repo, dest)
+
+
+# --------------------------------------------------------------------------
+# drive.py cleanup <run folder>
+# --------------------------------------------------------------------------
+
+def make_fake_run_folder(temp_root: Path, name: str = "ui-drive-abc123", verified: bool = True) -> Path:
+    run_dir = temp_root / name
+    run_dir.mkdir()
+    marker = {"run_id": "abc123", "path": str(run_dir.resolve())}
+    (run_dir / drive.RUN_MARKER_NAME).write_text(json.dumps(marker), encoding="utf-8")
+    if verified:
+        (run_dir / drive.TEARDOWN_MARKER_NAME).write_text("", encoding="utf-8")
+    (run_dir / "results.json").write_text("{}", encoding="utf-8")
+    return run_dir
+
+
+def test_cleanup_happy_path_removes_the_folder(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    run_dir = make_fake_run_folder(temp_root)
+    code = drive.main(["cleanup", str(run_dir)])
+    assert code == 0
+    assert not run_dir.exists()
+
+
+def test_cleanup_refuses_when_teardown_not_verified(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    run_dir = make_fake_run_folder(temp_root, verified=False)
+    code = drive.main(["cleanup", str(run_dir)])
+    assert code == 2
+    assert run_dir.exists()
+
+
+def test_cleanup_refuses_when_outside_temp_dir(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    elsewhere = tmp_path / "elsewhere" / "ui-drive-xyz"
+    elsewhere.mkdir(parents=True)
+    marker = {"run_id": "xyz", "path": str(elsewhere.resolve())}
+    (elsewhere / drive.RUN_MARKER_NAME).write_text(json.dumps(marker), encoding="utf-8")
+    (elsewhere / drive.TEARDOWN_MARKER_NAME).write_text("", encoding="utf-8")
+    code = drive.main(["cleanup", str(elsewhere)])
+    assert code == 2
+    assert elsewhere.exists()
+
+
+def test_cleanup_refuses_when_name_does_not_match_pattern(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    run_dir = make_fake_run_folder(temp_root, name="not-a-ui-drive-folder")
+    code = drive.main(["cleanup", str(run_dir)])
+    assert code == 2
+    assert run_dir.exists()
+
+
+def test_cleanup_refuses_when_run_marker_missing(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    run_dir = make_fake_run_folder(temp_root)
+    (run_dir / drive.RUN_MARKER_NAME).unlink()
+    code = drive.main(["cleanup", str(run_dir)])
+    assert code == 2
+    assert run_dir.exists()
+
+
+def test_cleanup_refuses_when_run_marker_path_mismatches(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    run_dir = make_fake_run_folder(temp_root)
+    (run_dir / drive.RUN_MARKER_NAME).write_text(
+        json.dumps({"run_id": "abc123", "path": "C:\\somewhere\\else"}), encoding="utf-8"
+    )
+    code = drive.main(["cleanup", str(run_dir)])
+    assert code == 2
+    assert run_dir.exists()
+
+
+def test_cleanup_refuses_when_teardown_marker_missing(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    run_dir = make_fake_run_folder(temp_root, verified=False)
+    code = drive.main(["cleanup", str(run_dir)])
+    assert code == 2
+    assert run_dir.exists()
+
+
+def test_cleanup_refuses_when_path_does_not_exist(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    code = drive.main(["cleanup", str(temp_root / "ui-drive-does-not-exist")])
+    assert code == 2
+
+
+def test_cleanup_refuses_when_path_is_a_symlink(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    real_run_dir = make_fake_run_folder(temp_root, name="ui-drive-real")
+    link = temp_root / "ui-drive-link"
+    try:
+        link.symlink_to(real_run_dir, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not available in this environment")
+    code = drive.main(["cleanup", str(link)])
+    assert code == 2
+    assert real_run_dir.exists()
+
+
+def test_cleanup_refuses_when_lock_is_held(tmp_path, monkeypatch):
+    import msvcrt
+
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    run_dir = make_fake_run_folder(temp_root)
+    lock_fd = drive.acquire_run_lock(run_dir)
+    try:
+        code = drive.main(["cleanup", str(run_dir)])
+        assert code == 2
+        assert run_dir.exists()
+    finally:
+        drive.release_run_lock(lock_fd)
+
+
+def test_cleanup_removes_junction_without_deleting_its_target(tmp_path, monkeypatch):
+    import subprocess
+
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    run_dir = make_fake_run_folder(temp_root)
+
+    target = tmp_path / "junction_target"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep me", encoding="utf-8")
+
+    junction = run_dir / "linked"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"junction creation is not available in this environment: {result.stderr}")
+
+    code = drive.main(["cleanup", str(run_dir)])
+    assert code == 0
+    assert not run_dir.exists()
+    assert target.is_dir()
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "keep me"

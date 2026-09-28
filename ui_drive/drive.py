@@ -21,6 +21,8 @@ import msvcrt
 import os
 import random
 import re
+import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -28,6 +30,11 @@ import tempfile
 import time
 from ctypes import wintypes
 from pathlib import Path
+
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+RUN_MARKER_NAME = ".ui-drive-run"
+TEARDOWN_MARKER_NAME = ".teardown-complete"
+LOCK_FILE_NAME = ".ui-drive.lock"
 
 HERE = Path(__file__).resolve().parent
 
@@ -167,6 +174,147 @@ def validate_manifest(repo: Path, manifest: dict, scenario_name: str) -> dict:
         "fixture_path": fixture_path,
         "timeout_s": timeout_s,
     }
+
+
+# --------------------------------------------------------------------------
+# Throwaway copy of the app repo. The app is only ever read from its real
+# repo; everything a run touches (settings, databases, sample data, logs,
+# screenshots) lives under the run folder instead.
+# --------------------------------------------------------------------------
+
+def is_reparse_point(path: Path) -> bool:
+    """True for a symlink, junction, or any other NTFS reparse point. Uses
+    lstat (does not follow the link) so this also catches a broken link."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return bool(getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def list_repo_files(repo: Path) -> list[str]:
+    """Returns every file `git` considers part of the working tree: tracked
+    files plus untracked-but-not-ignored ones, repo-relative. Raises
+    SetupError if repo is not inside a git work tree at all."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            capture_output=True,
+            timeout=30,
+        )
+    except FileNotFoundError as exc:
+        raise SetupError(f"could not run git to list {repo}: {exc}") from exc
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise SetupError(f"{repo} is not inside a git work tree (git ls-files failed: {stderr})")
+    raw = result.stdout.decode("utf-8", errors="surrogateescape")
+    return [p for p in raw.split("\0") if p]
+
+
+def copy_repo_to(repo: Path, app_dir: Path) -> None:
+    """Copies the repo's working-tree files into app_dir, preserving relative
+    layout. Skips a listed path that no longer exists on disk (a tracked file
+    that was since deleted). Refuses, before copying anything, any entry that
+    is a symlink/reparse point or whose resolved path falls outside the repo."""
+    repo_resolved = repo.resolve()
+    files = list_repo_files(repo)
+    for rel in files:
+        src = repo / rel
+        if is_reparse_point(src):
+            raise SetupError(f"refusing to copy a symlink/reparse point from the repo: {rel}")
+        if not src.exists():
+            continue
+        if not src.is_file():
+            continue
+        resolved = src.resolve()
+        try:
+            resolved.relative_to(repo_resolved)
+        except ValueError:
+            raise SetupError(f"refusing to copy a path that resolves outside the repo: {rel}")
+        dest = app_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+
+
+def repo_path_to_copy(repo: Path, app_dir: Path, absolute_path: Path) -> Path:
+    """Maps a path already resolved inside repo (as validate_manifest
+    returns) to the matching path inside the copy at app_dir."""
+    rel = absolute_path.relative_to(repo.resolve())
+    return app_dir / rel
+
+
+# --------------------------------------------------------------------------
+# Run folder: creation, the run marker, the lifetime lock, and the teardown
+# marker that only appears once cleanup is verified.
+# --------------------------------------------------------------------------
+
+def create_run_dir() -> Path:
+    run_dir = Path(tempfile.mkdtemp(prefix="ui-drive-", dir=tempfile.gettempdir())).resolve()
+    marker = {"run_id": secrets.token_hex(16), "path": str(run_dir)}
+    (run_dir / RUN_MARKER_NAME).write_text(json.dumps(marker), encoding="utf-8")
+    return run_dir
+
+
+def acquire_run_lock(run_dir: Path) -> int:
+    """Opens and exclusively locks <run_dir>\\.ui-drive.lock for the life of
+    this process. The handle is kept open (and so the lock held) until
+    release_run_lock is called; `cleanup` later uses the same lock to refuse
+    to delete a run folder a live drive.py is still using."""
+    lock_path = run_dir / LOCK_FILE_NAME
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT | os.O_BINARY)
+    try:
+        os.write(fd, b"0")
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    except OSError as exc:
+        os.close(fd)
+        raise SetupError(f"could not lock {lock_path}: {exc}") from exc
+    return fd
+
+
+def release_run_lock(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def write_teardown_marker(run_dir: Path) -> None:
+    (run_dir / TEARDOWN_MARKER_NAME).write_text("", encoding="utf-8")
+
+
+def base_child_env(base_env: dict, run_dir: Path) -> dict:
+    """Environment additions common to the app and its fixture: no .pyc
+    files left behind, and a private TEMP/TMP under the run folder so
+    anything either process writes to "the temp folder" lands inside the
+    run rather than the user's real one. Pure and testable without
+    launching anything."""
+    env = dict(base_env)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    tmp_dir = str(run_dir / "tmp")
+    env["TEMP"] = tmp_dir
+    env["TMP"] = tmp_dir
+    return env
+
+
+def fixture_env(base_env: dict, run_dir: Path, app_dir: Path) -> dict:
+    """Returns base_child_env(base_env, run_dir) plus UI_DRIVE_OUT_DIR
+    pointing at the run folder, so a fixture has somewhere to put its own
+    throwaway files, and UI_DRIVE_APP_DIR pointing at the copied app, so a
+    fixture can pre-place sample data next to it before the app launches. A
+    fixture is killed with the job and never gets a chance to clean up after
+    itself, so anything it writes under the run folder is deleted along with
+    the rest of the run's output. Pure and testable without launching
+    anything."""
+    env = base_child_env(base_env, run_dir)
+    env["UI_DRIVE_OUT_DIR"] = str(run_dir)
+    env["UI_DRIVE_APP_DIR"] = str(app_dir)
+    return env
 
 
 # --------------------------------------------------------------------------
@@ -387,6 +535,8 @@ kernel32.CreateProcessW.argtypes = [
 kernel32.CreateProcessW.restype = wintypes.BOOL
 kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
 kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+kernel32.TerminateProcess.restype = wintypes.BOOL
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.SetHandleInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
@@ -517,9 +667,14 @@ def launch_suspended_in_job(
 
     try:
         if not kernel32.AssignProcessToJobObject(job, h_process):
-            raise SetupError(f"AssignProcessToJobObject failed: {ctypes.get_last_error()}")
+            err = ctypes.get_last_error()
+            kernel32.TerminateProcess(h_process, 1)
+            kernel32.CloseHandle(h_process)
+            raise SetupError(f"AssignProcessToJobObject failed: {err}")
         status = ntdll.NtResumeProcess(h_process)
         if status != 0:
+            kernel32.TerminateProcess(h_process, 1)
+            kernel32.CloseHandle(h_process)
             raise SetupError(f"NtResumeProcess failed: 0x{status:08x}")
     finally:
         kernel32.CloseHandle(h_thread)
@@ -669,17 +824,6 @@ def read_first_json_line(path: Path, timeout_s: float, poll_interval_s: float = 
     raise SetupError(f"fixture did not print its JSON line to {path.name} within {timeout_s}s")
 
 
-def fixture_env(base_env: dict, out_dir: Path) -> dict:
-    """Returns base_env plus UI_DRIVE_OUT_DIR pointing at the run's output
-    folder, so a fixture has somewhere to put its own throwaway files. A
-    fixture is killed with the job and never gets a chance to clean up after
-    itself, so anything it writes under this folder is deleted along with the
-    rest of the run's output. Pure and testable without launching anything."""
-    env = dict(base_env)
-    env["UI_DRIVE_OUT_DIR"] = str(out_dir)
-    return env
-
-
 def open_inheritable_log_handle(path: Path) -> tuple[int, wintypes.HANDLE]:
     """Opens path for writing with an OS handle that a child process can
     inherit, for redirecting a suspended-launched process's stdout/stderr
@@ -694,7 +838,27 @@ def open_inheritable_log_handle(path: Path) -> tuple[int, wintypes.HANDLE]:
     return fd, handle
 
 
+def compute_exit_code(cleanup_verified: bool, checks_ok: bool, capture_ok: bool, window_ok: bool) -> int:
+    """Turns a run's outcome into drive.py's exit code. Cleanup being
+    unverified outranks everything else, so it always wins over a check
+    failure: 0 only when cleanup was verified and every check, the window
+    capture, and the close-and-verify step all passed; 1 when cleanup was
+    verified but something failed; 2 when cleanup itself could not be
+    verified. Pure and testable without launching anything."""
+    if not cleanup_verified:
+        return 2
+    if checks_ok and capture_ok and window_ok:
+        return 0
+    return 1
+
+
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "cleanup":
+        if len(argv) != 2:
+            print("usage: drive.py cleanup <run folder>", file=sys.stderr)
+            return 2
+        return cmd_cleanup(argv[1])
+
     if len(argv) != 2:
         print("usage: drive.py <app repo> <scenario name>", file=sys.stderr)
         return 2
@@ -721,150 +885,177 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
-    out_dir = Path(tempfile.mkdtemp(prefix="ui-drive-", dir=tempfile.gettempdir()))
-    print(f"output folder: {out_dir}")
-
-    interpreter = sys.executable
-    job = None
-    # entry_h_procs: only the app's own process, used to detect it exiting
-    # after WM_CLOSE. The fixture never responds to WM_CLOSE (it is meant to
-    # keep running until the job is torn down), so it does not belong in this
-    # wait list; all_h_procs is every handle opened, entry and fixture, kept
-    # only so their handles get closed at the end.
-    entry_h_procs: list[wintypes.HANDLE] = []
-    all_h_procs: list[wintypes.HANDLE] = []
-    port = None
-    exit_code = 2
+    run_dir = create_run_dir()
+    print(f"run folder: {run_dir}")
 
     try:
+        lock_fd = acquire_run_lock(run_dir)
+    except SetupError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        (run_dir / "tmp").mkdir(exist_ok=True)
+        app_dir = run_dir / "app"
+        app_dir.mkdir(exist_ok=True)
+
         try:
-            port = find_free_port()
+            copy_repo_to(repo, app_dir)
         except SetupError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
 
-        job = create_job_with_kill_on_close()
+        interpreter = sys.executable
+        job = None
+        # entry_h_procs: only the app's own process, used to detect it exiting
+        # after WM_CLOSE. The fixture never responds to WM_CLOSE (it is meant
+        # to keep running until the job is torn down), so it does not belong
+        # in this wait list; all_h_procs is every handle opened, entry and
+        # fixture, kept only so their handles get closed at the end.
+        entry_h_procs: list[wintypes.HANDLE] = []
+        all_h_procs: list[wintypes.HANDLE] = []
+        port = None
 
-        fixture_json = None
-        if plan["fixture_path"] is not None:
-            # Launched the same way as the app itself: suspended, assigned to
-            # the job, then resumed, so the fixture can never run a single
-            # instruction outside the job and can never outlive it. Its
-            # stdout/stderr go straight to files rather than pipes, since a
-            # pipe nobody is reading from can fill up and stall the fixture.
-            stdout_log = out_dir / "fixture_stdout.log"
-            stderr_log = out_dir / "fixture_stderr.log"
-            out_fd, out_handle = open_inheritable_log_handle(stdout_log)
-            err_fd, err_handle = open_inheritable_log_handle(stderr_log)
-            try:
-                _fixture_pid, fixture_h_process = launch_suspended_in_job(
-                    job,
-                    [interpreter, str(plan["fixture_path"])],
-                    repo,
-                    fixture_env(os.environ, out_dir),
-                    stdout_handle=out_handle,
-                    stderr_handle=err_handle,
-                )
-            finally:
-                os.close(out_fd)
-                os.close(err_fd)
-            all_h_procs.append(fixture_h_process)
-            fixture_json = read_first_json_line(stdout_log, LAUNCH_TIMEOUT_S)
+        try:
+            port = find_free_port()
+            job = create_job_with_kill_on_close()
 
-        env = dict(os.environ)
-        env["QTWEBENGINE_REMOTE_DEBUGGING"] = str(port)
+            entry_path = repo_path_to_copy(repo, app_dir, plan["entry_path"])
+            script_path = repo_path_to_copy(repo, app_dir, plan["script_path"])
+            fixture_path = (
+                repo_path_to_copy(repo, app_dir, plan["fixture_path"])
+                if plan["fixture_path"] is not None
+                else None
+            )
 
-        pid, h_process = launch_suspended_in_job(
-            job, [interpreter, str(plan["entry_path"])], repo, env
-        )
-        entry_h_procs.append(h_process)
-        all_h_procs.append(h_process)
+            fixture_json = None
+            if fixture_path is not None:
+                # Launched the same way as the app itself: suspended,
+                # assigned to the job, then resumed, so the fixture can never
+                # run a single instruction outside the job and can never
+                # outlive it. Its stdout/stderr go straight to files rather
+                # than pipes, since a pipe nobody is reading from can fill up
+                # and stall the fixture.
+                stdout_log = run_dir / "fixture_stdout.log"
+                stderr_log = run_dir / "fixture_stderr.log"
+                out_fd, out_handle = open_inheritable_log_handle(stdout_log)
+                err_fd, err_handle = open_inheritable_log_handle(stderr_log)
+                try:
+                    _fixture_pid, fixture_h_process = launch_suspended_in_job(
+                        job,
+                        [interpreter, str(fixture_path)],
+                        app_dir,
+                        fixture_env(os.environ, run_dir, app_dir),
+                        stdout_handle=out_handle,
+                        stderr_handle=err_handle,
+                    )
+                finally:
+                    os.close(out_fd)
+                    os.close(err_fd)
+                all_h_procs.append(fixture_h_process)
+                fixture_json = read_first_json_line(stdout_log, LAUNCH_TIMEOUT_S)
 
-        # The debug port is opened by QtWebEngineProcess.exe, a child the app
-        # spawns after launch, not by the entry script's own PID. A child of
-        # a job-assigned process joins the same job automatically, so "owned
-        # by this run" means "currently a member of the job", read fresh each
-        # time: get_job_pids(job), not a fixed set collected at launch.
-        def listener_ready():
-            output = run_netstat()
-            ok, _reason = verify_listener(port, output, get_job_pids(job))
-            return output if ok else None
+            env = base_child_env(os.environ, run_dir)
+            env["QTWEBENGINE_REMOTE_DEBUGGING"] = str(port)
 
-        netstat_output = _wait_for(listener_ready, LAUNCH_TIMEOUT_S)
-        if netstat_output is None:
-            output = run_netstat()
-            ok, reason = verify_listener(port, output, get_job_pids(job))
-            raise SetupError(f"debug port never came up cleanly: {reason}")
+            pid, h_process = launch_suspended_in_job(job, [interpreter, str(entry_path)], app_dir, env)
+            entry_h_procs.append(h_process)
+            all_h_procs.append(h_process)
 
-        target = _wait_for_page_target(port, plan["page_url_contains"], LAUNCH_TIMEOUT_S)
-        if target is None:
-            raise SetupError("no matching CDP page target appeared in time")
+            # The debug port is opened by QtWebEngineProcess.exe, a child the
+            # app spawns after launch, not by the entry script's own PID. A
+            # child of a job-assigned process joins the same job
+            # automatically, so "owned by this run" means "currently a
+            # member of the job", read fresh each time: get_job_pids(job),
+            # not a fixed set collected at launch.
+            def listener_ready():
+                output = run_netstat()
+                ok, _reason = verify_listener(port, output, get_job_pids(job))
+                return output if ok else None
 
-        timeout_ms = plan["timeout_s"] * 1000
+            netstat_output = _wait_for(listener_ready, LAUNCH_TIMEOUT_S)
+            if netstat_output is None:
+                output = run_netstat()
+                ok, reason = verify_listener(port, output, get_job_pids(job))
+                raise SetupError(f"debug port never came up cleanly: {reason}")
 
-        results_path = out_dir / "results.json"
-        job_request = {
-            "webSocketDebuggerUrl": target["webSocketDebuggerUrl"],
-            "scenarioPath": str(plan["script_path"]),
-            "outDir": str(out_dir),
-            "fixture": fixture_json,
-            "timeoutMs": timeout_ms,
-        }
-        request_path = out_dir / "cdp_request.json"
-        request_path.write_text(json.dumps(job_request), encoding="utf-8")
+            target = _wait_for_page_target(port, plan["page_url_contains"], LAUNCH_TIMEOUT_S)
+            if target is None:
+                raise SetupError("no matching CDP page target appeared in time")
 
-        node_log_path = out_dir / "node.log"
-        node_result = subprocess.run(
-            ["node", str(HERE / "cdp.mjs"), str(request_path)],
-            capture_output=True,
-            text=True,
-            timeout=plan["timeout_s"] + 30,
-        )
-        node_log_path.write_text(node_result.stdout + "\n" + node_result.stderr, encoding="utf-8")
+            timeout_ms = plan["timeout_s"] * 1000
 
-        results = {"checks": [], "error": None}
-        if results_path.is_file():
-            try:
-                results = json.loads(results_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                results["error"] = "results.json was not valid JSON"
-        elif node_result.returncode != 0:
-            results["error"] = f"cdp.mjs exited {node_result.returncode} before writing results"
+            results_path = run_dir / "results.json"
+            job_request = {
+                "webSocketDebuggerUrl": target["webSocketDebuggerUrl"],
+                "scenarioPath": str(script_path),
+                "outDir": str(run_dir),
+                "fixture": fixture_json,
+                "timeoutMs": timeout_ms,
+            }
+            request_path = run_dir / "cdp_request.json"
+            request_path.write_text(json.dumps(job_request), encoding="utf-8")
 
-        checks = results.get("checks", [])
-        for c in checks:
-            status = "PASS" if c.get("pass") else "FAIL"
-            line = f"{status} {c.get('name')}"
-            if not c.get("pass") and c.get("detail"):
-                line += f"  [{c['detail']}]"
-            print(line)
-        if results.get("error"):
-            print(f"SCENARIO ERROR: {results['error']}")
+            node_log_path = run_dir / "node.log"
+            node_result = subprocess.run(
+                ["node", str(HERE / "cdp.mjs"), str(request_path)],
+                capture_output=True,
+                text=True,
+                timeout=plan["timeout_s"] + 30,
+            )
+            node_log_path.write_text(node_result.stdout + "\n" + node_result.stderr, encoding="utf-8")
 
-        passed = sum(1 for c in checks if c.get("pass"))
-        print(f"{passed}/{len(checks)} checks passed")
+            results = {"checks": [], "error": None}
+            if results_path.is_file():
+                try:
+                    results = json.loads(results_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    results["error"] = "results.json was not valid JSON"
+            elif node_result.returncode != 0:
+                results["error"] = f"cdp.mjs exited {node_result.returncode} before writing results"
 
-        job_pids = get_job_pids(job)
-        hwnd = find_window_for_pids(job_pids, plan["window_title"])
-        if hwnd is not None:
-            capture_ok = capture_whole_window(hwnd, out_dir / "window.png")
-        else:
-            print("FAIL could not find the app window to capture")
-            capture_ok = False
+            checks = results.get("checks", [])
+            for c in checks:
+                status = "PASS" if c.get("pass") else "FAIL"
+                line = f"{status} {c.get('name')}"
+                if not c.get("pass") and c.get("detail"):
+                    line += f"  [{c['detail']}]"
+                print(line)
+            if results.get("error"):
+                print(f"SCENARIO ERROR: {results['error']}")
 
-        window_ok = _close_app_and_verify(job, job_pids, entry_h_procs, plan["window_title"], port, hwnd)
-        job = None  # _close_app_and_verify always closes the job before returning
+            passed = sum(1 for c in checks if c.get("pass"))
+            print(f"{passed}/{len(checks)} checks passed")
 
-        checks_ok = bool(checks) and passed == len(checks) and not results.get("error")
-        exit_code = 0 if (checks_ok and capture_ok and window_ok) else 1
-        return exit_code
+            job_pids = get_job_pids(job)
+            hwnd = find_window_for_pids(job_pids, plan["window_title"])
+            if hwnd is not None:
+                capture_ok = capture_whole_window(hwnd, run_dir / "window.png")
+            else:
+                print("FAIL could not find the app window to capture")
+                capture_ok = False
 
-    except SetupError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        job = _report_cleanup_after_error(job, port)
-        return 2
+            teardown = _close_app_and_verify(job, job_pids, entry_h_procs, plan["window_title"], port, hwnd)
+            job = None  # _close_app_and_verify always closes the job before returning
+            if teardown["cleanup_verified"]:
+                write_teardown_marker(run_dir)
+
+            checks_ok = bool(checks) and passed == len(checks) and not results.get("error")
+            return compute_exit_code(teardown["cleanup_verified"], checks_ok, capture_ok, teardown["ok"])
+
+        except Exception as exc:
+            if isinstance(exc, SetupError):
+                print(f"ERROR: {exc}", file=sys.stderr)
+            else:
+                print(f"ERROR: {exc!r}", file=sys.stderr)
+            job, cleanup_verified = _report_cleanup_after_error(job, port)
+            if cleanup_verified:
+                write_teardown_marker(run_dir)
+            return 2
+        finally:
+            _cleanup(job, all_h_procs)
     finally:
-        _cleanup(job, all_h_procs)
+        release_run_lock(lock_fd)
 
 
 def _wait_for_page_target(port: int, page_url_contains: str | None, timeout_s: float) -> dict | None:
@@ -902,12 +1093,19 @@ def _survivors(pids: set[int], timeout_s: float) -> list[int]:
     return sorted(p for p in pids if not pid_is_gone(p))
 
 
-def _close_app_and_verify(job, job_pids: set[int], entry_h_procs: list, window_title: str, port: int, hwnd: int | None) -> bool:
+def _close_app_and_verify(
+    job, job_pids: set[int], entry_h_procs: list, window_title: str, port: int, hwnd: int | None
+) -> dict:
     """Closes the app window, then closes the job (which kills anything the
     job still holds, including a fixture that never responds to WM_CLOSE),
     then verifies every PID the job ever held is actually gone and the port
     is no longer listening. Closes the job handle exactly once, here; the
-    caller must not close it again."""
+    caller must not close it again.
+
+    Returns a dict with two separate flags: "cleanup_verified" (the job is
+    closed, no survivor PID, port no longer listening: this is what gates
+    writing the teardown marker) and "ok" (cleanup_verified plus the app
+    window was actually found, the overall pass/fail signal)."""
     found_window = hwnd is not None or find_window_for_pids(job_pids, window_title) is not None
     if hwnd is None:
         hwnd = find_window_for_pids(job_pids, window_title)
@@ -927,7 +1125,8 @@ def _close_app_and_verify(job, job_pids: set[int], entry_h_procs: list, window_t
     port_output = run_netstat()
     still_listening = port_is_listening(port, port_output)
 
-    ok = found_window and not survivors and not still_listening
+    cleanup_verified = not survivors and not still_listening
+    ok = found_window and cleanup_verified
     if ok:
         print("PASS cleanup verified (no leftover process, port closed)")
     else:
@@ -939,18 +1138,19 @@ def _close_app_and_verify(job, job_pids: set[int], entry_h_procs: list, window_t
         if not found_window:
             detail.append("window was never found")
         print(f"FAIL cleanup left something behind ({'; '.join(detail)})")
-    return ok
+    return {"ok": ok, "cleanup_verified": cleanup_verified}
 
 
 def _report_cleanup_after_error(job, port: int | None):
-    """Runs after a SetupError, once the run is already being abandoned:
-    closes the job if one exists (killing anything it still holds) and
-    reports whether that actually cleaned everything up, the same way a
-    successful run does. Returns None, so the caller can unconditionally
-    overwrite its `job` variable with the result and rely on _cleanup not
-    closing it a second time."""
+    """Runs after main's setup/run code raised, once the run is already
+    being abandoned: closes the job if one exists (killing anything it still
+    holds) and reports whether that actually cleaned everything up, the same
+    way a successful run does. Returns (None, cleanup_verified): the caller
+    unconditionally overwrites its `job` variable with the first element, so
+    _cleanup does not close the job a second time, and uses the second
+    element to decide whether the teardown marker may be written."""
     if job is None:
-        return None
+        return None, True
     try:
         pids = get_job_pids(job)
     except SetupError:
@@ -959,7 +1159,8 @@ def _report_cleanup_after_error(job, port: int | None):
 
     survivors = _survivors(pids, SURVIVOR_TIMEOUT_S)
     still_listening = port_is_listening(port, run_netstat()) if port is not None else False
-    if survivors or still_listening:
+    cleanup_verified = not survivors and not still_listening
+    if not cleanup_verified:
         detail = []
         if survivors:
             detail.append(f"PIDs still alive: {survivors}")
@@ -968,7 +1169,7 @@ def _report_cleanup_after_error(job, port: int | None):
         print(f"FAIL cleanup left something behind ({'; '.join(detail)})", file=sys.stderr)
     else:
         print("cleanup verified: no leftover process, port closed", file=sys.stderr)
-    return None
+    return None, cleanup_verified
 
 
 def _cleanup(job, h_procs: list) -> None:
@@ -982,6 +1183,104 @@ def _cleanup(job, h_procs: list) -> None:
             kernel32.CloseHandle(h)
         except Exception:
             pass
+
+
+# --------------------------------------------------------------------------
+# `drive.py cleanup <run folder>`: deletes one run folder, refusing unless
+# every safety check below holds.
+# --------------------------------------------------------------------------
+
+def _delete_dir_tree_no_follow(root: Path) -> None:
+    """Removes root and everything under it, bottom-up, never following a
+    symlink or junction found inside: such an entry is removed as the link
+    itself (os.rmdir on a reparse point removes only the link, not its
+    target's contents), not recursed into."""
+
+    def _remove_contents(d: Path) -> None:
+        for entry in os.scandir(d):
+            p = Path(entry.path)
+            if entry.is_dir(follow_symlinks=False) and not is_reparse_point(p):
+                _remove_contents(p)
+                os.rmdir(p)
+            elif entry.is_dir(follow_symlinks=False):
+                os.rmdir(p)  # reparse point (symlink/junction): remove the link only
+            else:
+                # chmod follows a link, so a file symlink is removed as-is
+                # rather than clearing read-only on its target.
+                if not is_reparse_point(p):
+                    try:
+                        os.chmod(p, 0o666)
+                    except OSError:
+                        pass
+                os.remove(p)
+
+    _remove_contents(root)
+    os.rmdir(root)
+
+
+def cmd_cleanup(run_dir_arg: str) -> int:
+    path = Path(run_dir_arg)
+
+    def refuse(msg: str) -> int:
+        print(f"ERROR: refusing to clean up {path}: {msg}", file=sys.stderr)
+        return 2
+
+    if not path.exists():
+        return refuse("path does not exist")
+    if is_reparse_point(path):
+        return refuse("path is a symlink/reparse point")
+
+    temp_root = Path(tempfile.gettempdir()).resolve()
+
+    def identity_ok() -> str | None:
+        """Returns None if every identity check passes, else a reason."""
+        if is_reparse_point(path):
+            return "path is a symlink/reparse point"
+        canonical = path.resolve()
+        if canonical.parent != temp_root:
+            return f"parent is not {temp_root}"
+        if not canonical.name.startswith("ui-drive-"):
+            return "folder name does not look like a ui_drive run"
+        marker_path = canonical / RUN_MARKER_NAME
+        if not marker_path.is_file():
+            return f"missing {RUN_MARKER_NAME}"
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return f"could not read {RUN_MARKER_NAME}: {exc}"
+        if marker.get("path") != str(canonical):
+            return f"{RUN_MARKER_NAME} does not match this folder"
+        if not (canonical / TEARDOWN_MARKER_NAME).is_file():
+            return f"missing {TEARDOWN_MARKER_NAME} (teardown was not verified)"
+        return None
+
+    reason = identity_ok()
+    if reason:
+        return refuse(reason)
+
+    canonical = path.resolve()
+    try:
+        lock_fd = acquire_run_lock(canonical)
+    except SetupError as exc:
+        return refuse(f"could not lock run folder (a run may still be using it): {exc}")
+    release_run_lock(lock_fd)
+
+    # Re-check immediately before deleting: the checks above, the lock
+    # attempt, and the delete itself are not one atomic operation.
+    reason = identity_ok()
+    if reason:
+        return refuse(reason)
+
+    try:
+        _delete_dir_tree_no_follow(canonical)
+    except OSError as exc:
+        return refuse(f"delete failed: {exc}")
+
+    if canonical.exists():
+        return refuse("folder still exists after deletion")
+
+    print(f"removed {canonical}")
+    return 0
 
 
 if __name__ == "__main__":
