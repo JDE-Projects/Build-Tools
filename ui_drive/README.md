@@ -128,8 +128,9 @@ unexpected result refuses rather than falling back to an ordinary
 path-based delete. Exit code 0 means the folder was deleted and verified
 gone.
 
-Exit code for a run is 0 only when every check passed and cleanup was
-verified, 1 when cleanup was verified but a check failed, and 2 whenever
+Exit code for a run is 0 only when every check, the window capture, and
+closing the app all passed and cleanup was verified, 1 when cleanup was
+verified but one of those failed, and 2 whenever
 cleanup could not be verified (this always wins over a check result) or any
 setup problem came up first (bad manifest, app already running, `git`
 missing or the repo not a work tree, the debug port never came up, a Node or
