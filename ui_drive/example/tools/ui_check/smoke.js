@@ -4,7 +4,7 @@
 // A scenario file's default export is an async function that receives the
 // helpers object.
 
-export default async function smoke({ click, type, press, evaluate, waitFor, check, screenshot, fixture }) {
+export default async function smoke({ click, type, keys, press, evaluate, waitFor, check, screenshot, fixture }) {
   // fixture: the JSON the fixture printed before the app launched.
   check(
     "fixture JSON reached the scenario",
@@ -36,6 +36,29 @@ export default async function smoke({ click, type, press, evaluate, waitFor, che
   }
   const nameAfterBackspace = await evaluate("document.getElementById('nameBox').value");
   check("press() sends real key events", nameAfterBackspace === "", `got ${JSON.stringify(nameAfterBackspace)}`);
+
+  // type(): on a field that already has content, replaces it rather than
+  // appending to it (a real Ctrl+A select-all, then the new text).
+  const prefilledBefore = await evaluate("document.getElementById('prefilledBox').value");
+  check("prefilled box starts with its own value", prefilledBefore === "replace me", `got ${prefilledBefore}`);
+  await type("#prefilledBox", "Grace");
+  const prefilledAfter = await evaluate("document.getElementById('prefilledBox').value");
+  check("type() replaces a prefilled field's contents", prefilledAfter === "Grace", `got ${prefilledAfter}`);
+
+  // keys(): the same real per-character key events type() uses internally,
+  // available directly for a plain field.
+  await keys("#nameBox", "Bell");
+  const nameAfterKeys = await evaluate("document.getElementById('nameBox').value");
+  check("keys() sends real per-character key events", nameAfterKeys === "Bell", `got ${nameAfterKeys}`);
+
+  // type() on a native date input: Input.insertText can't reach a
+  // segmented control's sub-fields, so type() falls back to real
+  // per-character key events, starting from the first segment.
+  const dateBefore = await evaluate("document.getElementById('dateBox').value");
+  check("date box starts at its own value", dateBefore === "2020-01-01", `got ${dateBefore}`);
+  await type("#dateBox", "03152027");
+  const dateAfter = await evaluate("document.getElementById('dateBox').value");
+  check("type() fills a native date input via real key events", dateAfter === "2027-03-15", `got ${dateAfter}`);
 
   // theme toggle, then a screenshot of each theme.
   await screenshot("theme-light");

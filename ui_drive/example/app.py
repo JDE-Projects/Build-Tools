@@ -1,8 +1,9 @@
 """Minimal pywebview (Qt) app used as the worked example for ui_drive.
 
-One window, one page: a button that increments a counter, a text box, and a
-theme toggle. The counter goes up through a real call into js_api, the same
-path drive.py's example scenario drives over CDP.
+One window, one page: a button that increments a counter, an empty text box,
+a pre-filled text box, a native date input, and a theme toggle. The counter
+goes up through a real call into js_api, the same path drive.py's example
+scenario drives over CDP.
 
     <this folder>\\.venv\\Scripts\\python.exe app.py
 """
@@ -35,6 +36,12 @@ PAGE_HTML = """<!DOCTYPE html>
   <br><br>
   <label for="nameBox">Name:</label>
   <input id="nameBox" type="text">
+  <br><br>
+  <label for="prefilledBox">Prefilled:</label>
+  <input id="prefilledBox" type="text" value="replace me">
+  <br><br>
+  <label for="dateBox">Date:</label>
+  <input id="dateBox" type="date" value="2020-01-01">
   <br><br>
   <button id="themeBtn">Toggle theme</button>
   <p id="themeLabel">light</p>

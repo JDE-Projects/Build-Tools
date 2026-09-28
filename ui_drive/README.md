@@ -111,8 +111,9 @@ It receives one object with these helpers:
 | Helper | What it does |
 |---|---|
 | `click(selector)` | Scrolls the element into view, then sends a real mouse click at its on-screen centre. Fails the check if the element is missing, hidden, disabled, or covered by something else at that point |
-| `type(selector, text)` | Clicks the element to focus it (same checks as `click`), then inserts real text as if typed |
-| `press(key)` | Sends a real key press. Supported keys: `Enter`, `Tab`, `Escape`, `Backspace`, `ArrowUp`, `ArrowDown`. Add more to `KEY_TABLE` in `cdp.mjs` if a scenario needs one |
+| `type(selector, text)` | Clicks the element to focus it (same checks as `click`), then **replaces its entire current contents** with `text`, the way a person clearing a field before typing over it would: a real Ctrl+A (the browser's own "select all" editing command, not just the key's default handling) followed by the new text. For a native segmented input (`<input type="date">`, `time`, `month`, `week`, `datetime-local`), where `Input.insertText` never reaches the control's sub-fields at all, it instead presses Home and sends `text` as real per-character key events, the same way a person fills one of these in one segment at a time |
+| `keys(selector, text)` | Clicks the element, then sends `text` as real per-character key events (keydown/keyup per character, not one bulk text-insertion event). `type()` already does this automatically for a native segmented input; use this directly on a plain field when a scenario needs to watch something react to individual keystrokes rather than one paste-like insertion |
+| `press(key)` | Sends a real key press. Supported keys: `Enter`, `Tab`, `Escape`, `Backspace`, `ArrowUp`, `ArrowDown`, `Home`. Add more to `KEY_TABLE` in `cdp.mjs` if a scenario needs one |
 | `evaluate(js)` | Runs JavaScript in the page and returns its value. For reading state and setting up test conditions, not for simulating input |
 | `waitFor(js, timeoutMs)` | Polls `js` until it is truthy, or throws after `timeoutMs` (default 5000) |
 | `check(name, pass, detail)` | Records one pass/fail result. `detail` is shown only when `pass` is false |
@@ -134,10 +135,12 @@ only captures the page itself; use this one when the window frame matters.
 ## The example
 
 `ui_drive/example/` is a minimal pywebview app: one window with a counter
-button wired to a real `js_api` call, a text box, and a light/dark theme
-toggle. Its manifest and `smoke` scenario exercise every helper above,
-including one check that goes through the real Python bridge. Run it with
-any interpreter that has `pywebview` and `PySide6` installed:
+button wired to a real `js_api` call, an empty text box, a pre-filled text
+box, a date input, and a light/dark theme toggle. Its manifest and `smoke`
+scenario exercise every helper above, including one check that goes through
+the real Python bridge, `type()` replacing a pre-filled field's contents
+instead of appending to it, and `type()`'s native-date-input fallback. Run
+it with any interpreter that has `pywebview` and `PySide6` installed:
 
 ```
 <python with pywebview and PySide6>.exe ui_drive\drive.py ui_drive\example smoke

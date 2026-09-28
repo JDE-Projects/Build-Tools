@@ -94,7 +94,60 @@ const KEY_TABLE = {
   Backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
   ArrowUp: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
   ArrowDown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
+  Home: { key: "Home", code: "Home", windowsVirtualKeyCode: 36 },
 };
+
+// CDP Input.dispatchKeyEvent modifier bits (Alt/Ctrl/Meta/Shift).
+const MODIFIER_CTRL = 2;
+const MODIFIER_SHIFT = 8;
+
+// key/code/windowsVirtualKeyCode for a single printable character, used by
+// keys() and by type()'s per-character fallback for native segmented inputs.
+// Covers what scenarios are likely to type: digits, letters, and a handful
+// of punctuation marks. A character not in this table still carries through
+// as plain text (most editable fields accept that), but a native control
+// that insists on a real key code for it won't respond; add it here if a
+// scenario needs one.
+const PUNCTUATION_KEYS = {
+  " ": { code: "Space", vk: 32 },
+  "-": { code: "Minus", vk: 189 },
+  "_": { code: "Minus", vk: 189, shift: true },
+  "/": { code: "Slash", vk: 191 },
+  "?": { code: "Slash", vk: 191, shift: true },
+  ".": { code: "Period", vk: 190 },
+  ",": { code: "Comma", vk: 188 },
+  "@": { code: "Digit2", vk: 50, shift: true },
+  "'": { code: "Quote", vk: 222 },
+  ":": { code: "Semicolon", vk: 186, shift: true },
+  ";": { code: "Semicolon", vk: 186 },
+};
+
+function charKeySpec(ch) {
+  if (ch >= "0" && ch <= "9") {
+    return { key: ch, code: `Digit${ch}`, windowsVirtualKeyCode: 0x30 + Number(ch) };
+  }
+  const lower = ch.toLowerCase();
+  if (lower >= "a" && lower <= "z") {
+    const isUpper = ch !== lower;
+    return {
+      key: ch,
+      code: `Key${lower.toUpperCase()}`,
+      windowsVirtualKeyCode: lower.toUpperCase().charCodeAt(0),
+      modifiers: isUpper ? MODIFIER_SHIFT : 0,
+    };
+  }
+  const p = PUNCTUATION_KEYS[ch];
+  if (p) {
+    return { key: ch, code: p.code, windowsVirtualKeyCode: p.vk, modifiers: p.shift ? MODIFIER_SHIFT : 0 };
+  }
+  return { key: ch, code: "", windowsVirtualKeyCode: 0 };
+}
+
+// Native input types with their own segmented editing UI (date/time
+// pickers), where a person types digit by digit into the currently
+// highlighted segment rather than replacing the whole field's text at once.
+// Input.insertText does not drive these at all: it lands nowhere, silently.
+const SEGMENTED_INPUT_TYPES = new Set(["date", "time", "month", "week", "datetime-local"]);
 
 // Returns the element's on-screen centre and whether it is a safe click
 // target: present, visible, not disabled, and not covered by something
@@ -113,7 +166,13 @@ const PROBE_JS = (selector) => `
   const disabled = !!el.disabled;
   const top = document.elementFromPoint(cx, cy);
   const covered = !(top && (top === el || el.contains(top) || top.contains(el)));
-  return { found: true, x: cx, y: cy, hidden, disabled, covered };
+  const inputType = el.tagName === "INPUT" ? (el.getAttribute("type") || "text").toLowerCase() : null;
+  // A few px in from the left edge, not the centre: for a segmented input
+  // (date/time), this is what reliably lands the caret in the first
+  // segment regardless of which locale format the segments are displayed
+  // in, left to right.
+  const leftX = r.left + Math.min(8, r.width / 4);
+  return { found: true, x: cx, y: cy, leftX, hidden, disabled, covered, inputType };
 })()
 `;
 
@@ -146,10 +205,75 @@ class Runner {
     await this._clickAt(probe.x, probe.y);
   }
 
+  // Selects the field's entire current contents with a real Ctrl+A key
+  // event (the "selectAll" editor command, not just the key's default
+  // browser handling), the same way a person clears a field before typing
+  // over it. Verified against QtWebEngine: after this, an insertText call
+  // replaces the selection rather than inserting alongside it.
+  async _selectAll() {
+    const spec = { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: MODIFIER_CTRL };
+    await this.devtools.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      commands: ["selectAll"],
+      ...spec,
+    });
+    await this.devtools.send("Input.dispatchKeyEvent", { type: "keyUp", ...spec });
+  }
+
+  // Sends one real keyDown/keyUp pair per character, the same shape as
+  // press() but with the character attached so the page (and any native
+  // control underneath it) sees an actual keystroke instead of a block of
+  // inserted text. This is what a native segmented control like
+  // <input type="date"> needs: Input.insertText does not reach its
+  // sub-fields at all.
+  async _typeChars(text) {
+    for (const ch of text) {
+      const spec = charKeySpec(ch);
+      await this.devtools.send("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        text: ch,
+        unmodifiedText: ch,
+        ...spec,
+      });
+      await this.devtools.send("Input.dispatchKeyEvent", { type: "keyUp", ...spec });
+    }
+  }
+
+  // Replaces the field's contents the way a person does: click it, select
+  // everything already there, then type over it. For a native segmented
+  // input (date/time/month/week/datetime-local), Input.insertText never
+  // reaches the sub-fields at all, so this instead presses Home (jumps to
+  // the first segment) and sends text as real per-character key events,
+  // which is also how a person fills one of these in: each segment
+  // highlights itself as it gains focus and the next keystroke overwrites
+  // it, auto-advancing to the next segment.
   async type(selector, text) {
     const probe = await this._probe(selector);
+    if (probe.inputType && SEGMENTED_INPUT_TYPES.has(probe.inputType)) {
+      // Click near the left edge, not the centre: that's what reliably
+      // lands the caret in the first segment, whichever segment that is
+      // for the browser's current locale (month, day, or year could all
+      // come first). Home as a belt-and-braces nudge in case the click
+      // alone leaves it elsewhere.
+      await this._clickAt(probe.leftX, probe.y);
+      await this.press("Home");
+      await this._typeChars(text);
+      return;
+    }
     await this._clickAt(probe.x, probe.y);
+    await this._selectAll();
     await this.devtools.send("Input.insertText", { text });
+  }
+
+  // Sends text as real per-character key events on any element, regardless
+  // of input type. type() already does this automatically for a native
+  // segmented input; use this directly for a plain field when a scenario
+  // needs to watch something react to individual keystrokes rather than one
+  // bulk text-insertion event.
+  async keys(selector, text) {
+    const probe = await this._probe(selector);
+    await this._clickAt(probe.x, probe.y);
+    await this._typeChars(text);
   }
 
   async press(key) {
@@ -210,6 +334,7 @@ async function main() {
     const helpers = {
       click: (s) => runner.click(s),
       type: (s, t) => runner.type(s, t),
+      keys: (s, t) => runner.keys(s, t),
       press: (k) => runner.press(k),
       evaluate: (js) => runner.evaluate(js),
       waitFor: (js, t) => runner.waitFor(js, t),
