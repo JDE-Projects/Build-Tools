@@ -439,6 +439,191 @@ def test_main_returns_clean_refusal_when_setup_subdirectory_exists(tmp_path, mon
     assert drive.main([str(repo), "smoke"]) == 2
 
 
+class FakeKernel32:
+    def __init__(self):
+        self.closed = []
+
+    def CloseHandle(self, handle):
+        self.closed.append(handle)
+        return True
+
+    def GetProcessId(self, handle):
+        return 101 if handle == "app-process" else 0
+
+
+def prepare_main_teardown_test(tmp_path, monkeypatch, launch):
+    repo = make_repo(tmp_path)
+    run_dir = tmp_path / VALID_RUN_NAME
+    run_dir.mkdir()
+    kernel32 = FakeKernel32()
+    markers = []
+    plan = {
+        "mutex": "Test_Mutex",
+        "entry_path": repo / "entry.py",
+        "script_path": repo / "tools" / "ui_check" / "scenario.js",
+        "fixture_path": None,
+        "window_title": "Test Window",
+        "page_url_contains": None,
+        "timeout_s": 10,
+    }
+
+    monkeypatch.setattr(drive, "kernel32", kernel32)
+    monkeypatch.setattr(drive, "mutex_exists", lambda mutex: False)
+    monkeypatch.setattr(drive, "load_manifest", lambda path: {})
+    monkeypatch.setattr(drive, "validate_manifest", lambda *args: plan)
+    monkeypatch.setattr(drive, "create_run_dir", lambda: (run_dir, "run-pin"))
+    monkeypatch.setattr(drive, "acquire_run_lock", lambda path: "run-lock")
+    monkeypatch.setattr(drive, "release_run_lock", lambda fd: None)
+    monkeypatch.setattr(drive, "prepare_run_subdirectories", lambda path: (path / "tmp", path / "app"))
+    monkeypatch.setattr(drive, "copy_repo_to", lambda source, dest: None)
+    monkeypatch.setattr(drive, "find_free_port", lambda: 41000)
+    monkeypatch.setattr(drive, "create_job_with_kill_on_close", lambda: "job")
+    monkeypatch.setattr(drive, "launch_suspended_in_job", launch)
+    monkeypatch.setattr(drive, "write_teardown_marker", lambda path: markers.append(path))
+    return repo, kernel32, markers
+
+
+def test_main_refuses_when_mutex_is_held_without_creating_a_run(monkeypatch, tmp_path):
+    repo = make_repo(tmp_path)
+    monkeypatch.setattr(drive, "mutex_exists", lambda mutex: True)
+    monkeypatch.setattr(
+        drive, "create_run_dir", lambda: pytest.fail("create_run_dir must not run when the mutex is held")
+    )
+    monkeypatch.setattr(
+        drive,
+        "launch_suspended_in_job",
+        lambda *args: pytest.fail("launch_suspended_in_job must not run when the mutex is held"),
+    )
+
+    assert drive.main([str(repo), "smoke"]) == 2
+
+
+def test_main_exception_after_job_writes_marker_when_cleanup_is_verified(tmp_path, monkeypatch):
+    def fail_launch(*args, **kwargs):
+        raise drive.SetupError("app launch failed")
+
+    repo, kernel32, markers = prepare_main_teardown_test(tmp_path, monkeypatch, fail_launch)
+    monkeypatch.setattr(drive, "get_job_pids", lambda job: {101})
+    monkeypatch.setattr(drive, "pid_is_gone", lambda pid: True)
+    monkeypatch.setattr(drive, "run_netstat", lambda: "")
+
+    assert drive.main([str(repo), "smoke"]) == 2
+    assert kernel32.closed.count("job") == 1
+    assert markers
+
+
+def test_main_exception_after_job_skips_marker_when_a_survivor_remains(tmp_path, monkeypatch):
+    def fail_launch(*args, **kwargs):
+        raise drive.SetupError("app launch failed")
+
+    repo, kernel32, markers = prepare_main_teardown_test(tmp_path, monkeypatch, fail_launch)
+    monkeypatch.setattr(drive, "get_job_pids", lambda job: {101})
+    monkeypatch.setattr(drive, "pid_is_gone", lambda pid: False)
+    monkeypatch.setattr(drive, "run_netstat", lambda: "")
+
+    assert drive.main([str(repo), "smoke"]) == 2
+    assert kernel32.closed.count("job") == 1
+    assert not markers
+
+
+def test_main_keyboard_interrupt_after_job_writes_marker_when_cleanup_is_verified(tmp_path, monkeypatch):
+    def interrupt_launch(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    repo, kernel32, markers = prepare_main_teardown_test(tmp_path, monkeypatch, interrupt_launch)
+    monkeypatch.setattr(drive, "get_job_pids", lambda job: {101})
+    monkeypatch.setattr(drive, "pid_is_gone", lambda pid: True)
+    monkeypatch.setattr(drive, "run_netstat", lambda: "")
+
+    assert drive.main([str(repo), "smoke"]) == 2
+    assert kernel32.closed.count("job") == 1
+    assert markers
+
+
+@pytest.mark.parametrize("interrupt_at", ["window lookup", "survivor wait", "netstat call"])
+def test_main_keyboard_interrupt_in_close_verifies_known_processes(tmp_path, monkeypatch, interrupt_at):
+    repo, kernel32, markers = prepare_main_teardown_test(
+        tmp_path, monkeypatch, lambda *args, **kwargs: (101, "app-process")
+    )
+    monkeypatch.setattr(drive, "get_job_pids", lambda job: {101})
+    monkeypatch.setattr(drive, "verify_listener", lambda *args: (True, None))
+    monkeypatch.setattr(drive, "_wait_for_page_target", lambda *args: {"webSocketDebuggerUrl": "ws://test"})
+    monkeypatch.setattr(drive, "collect_scenario_results", lambda *args: {"checks": [], "error": None})
+    monkeypatch.setattr(drive, "capture_whole_window", lambda *args: True)
+    monkeypatch.setattr(drive, "pid_is_gone", lambda pid: True)
+    process_checks = []
+    monkeypatch.setattr(drive, "process_is_running", lambda handle: process_checks.append(handle) and False)
+    monkeypatch.setattr(drive.subprocess, "run", lambda *args, **kwargs: type("Result", (), {"stdout": "", "stderr": "", "returncode": 0})())
+
+    if interrupt_at == "window lookup":
+        lookups = iter([None, KeyboardInterrupt()])
+
+        def find_window(*args):
+            value = next(lookups)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        monkeypatch.setattr(drive, "find_window_for_pids", find_window)
+        monkeypatch.setattr(drive, "run_netstat", lambda: "")
+    elif interrupt_at == "survivor wait":
+        monkeypatch.setattr(drive, "find_window_for_pids", lambda *args: 1)
+        waits = 0
+
+        def wait_for(predicate, *args):
+            nonlocal waits
+            waits += 1
+            if waits == 3:
+                raise KeyboardInterrupt
+            return predicate()
+
+        monkeypatch.setattr(drive, "_wait_for", wait_for)
+        monkeypatch.setattr(drive, "run_netstat", lambda: "")
+    else:
+        monkeypatch.setattr(drive, "find_window_for_pids", lambda *args: 1)
+        netstat_calls = 0
+
+        def run_netstat():
+            nonlocal netstat_calls
+            netstat_calls += 1
+            if netstat_calls == 2:
+                raise KeyboardInterrupt
+            return ""
+
+        monkeypatch.setattr(drive, "run_netstat", run_netstat)
+
+    assert drive.main([str(repo), "smoke"]) == 2
+    assert kernel32.closed.count("job") == 1
+    assert process_checks
+    assert markers
+
+
+def test_report_cleanup_after_error_checks_known_pids_without_an_open_job(monkeypatch):
+    checked_pids = []
+    monkeypatch.setattr(drive, "pid_is_gone", lambda pid: checked_pids.append(pid) or True)
+
+    assert drive._report_cleanup_after_error(None, None, {101}, []) == (None, True)
+    assert checked_pids
+
+
+@pytest.mark.parametrize("interrupt_at", ["job snapshot", "survivor wait"])
+def test_report_cleanup_after_error_second_interrupt_closes_job_once(monkeypatch, interrupt_at):
+    kernel32 = FakeKernel32()
+    monkeypatch.setattr(drive, "kernel32", kernel32)
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    if interrupt_at == "job snapshot":
+        monkeypatch.setattr(drive, "get_job_pids", interrupt)
+    else:
+        monkeypatch.setattr(drive, "get_job_pids", lambda job: {101})
+        monkeypatch.setattr(drive, "_wait_for", interrupt)
+
+    assert drive._report_cleanup_after_error("job", 41000, {101}, []) == (None, False)
+    assert kernel32.closed == ["job"]
+
+
 def test_clear_readonly_via_handle_refuses_attribute_update_failure(monkeypatch):
     monkeypatch.setattr(drive, "_handle_attributes", lambda handle: (drive.FILE_ATTRIBUTE_READONLY, 0))
     monkeypatch.setattr(drive.kernel32, "SetFileInformationByHandle", lambda *args: False)
