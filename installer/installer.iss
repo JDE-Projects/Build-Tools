@@ -51,6 +51,12 @@ Source: "THIRD-PARTY-LICENSES.txt";  DestDir: "{app}"; Flags: ignoreversion skip
 Source: "LICENSE.LGPL-3.0.txt";      DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "LICENSE.GPL-3.0.txt";       DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
+[InstallDelete]
+; Remove libraries that a newer build no longer ships, which otherwise stay forever.
+; Apps keep all user data next to the exe and never inside _internal. This delete is
+; not undone if installation fails or is cancelled partway; running Setup again repairs it.
+Type: filesandordirs; Name: "{app}\_internal"; Check: IsUpgradeOfThisApp
+
 [Icons]
 Name: "{group}\{#MyAppName}";           Filename: "{app}\{#MyExeName}"
 Name: "{autodesktop}\{#MyAppName}";     Filename: "{app}\{#MyExeName}"; Tasks: desktopicon
@@ -161,3 +167,54 @@ begin
   SuppressibleMsgBox(MessageText, mbError, MB_OK, IDOK);
 end;
 
+function PathsMatch(const FirstPath, SecondPath: String): Boolean;
+var
+  NormalizedFirstPath, NormalizedSecondPath: String;
+begin
+  NormalizedFirstPath := FirstPath;
+  NormalizedSecondPath := SecondPath;
+  while (Length(NormalizedFirstPath) > 0)
+    and (Copy(NormalizedFirstPath, Length(NormalizedFirstPath), 1) = '\') do
+    Delete(NormalizedFirstPath, Length(NormalizedFirstPath), 1);
+  while (Length(NormalizedSecondPath) > 0)
+    and (Copy(NormalizedSecondPath, Length(NormalizedSecondPath), 1) = '\') do
+    Delete(NormalizedSecondPath, Length(NormalizedSecondPath), 1);
+  Result := CompareText(NormalizedFirstPath, NormalizedSecondPath) = 0;
+end;
+
+function IsUpgradeOfThisApp: Boolean;
+var
+  AppDir, PreviousAppDir, UninstallKey: String;
+begin
+  Result := False;
+  AppDir := ExpandConstant('{app}');
+  UninstallKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppId}_is1';
+
+  if RegQueryStringValue(HKEY_CURRENT_USER, UninstallKey,
+       'Inno Setup: App Path', PreviousAppDir) then
+  begin
+    if PathsMatch(PreviousAppDir, AppDir) then
+    begin
+      Log('Upgrade cleanup enabled: HKCU uninstall entry matches ' + AppDir);
+      Result := True;
+      exit;
+    end;
+    Log('Upgrade cleanup skipped: HKCU uninstall entry points to ' + PreviousAppDir);
+  end
+  else
+    Log('Upgrade cleanup: HKCU uninstall entry or app path value was not found.');
+
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE, UninstallKey,
+       'Inno Setup: App Path', PreviousAppDir) then
+  begin
+    if PathsMatch(PreviousAppDir, AppDir) then
+    begin
+      Log('Upgrade cleanup enabled: HKLM uninstall entry matches ' + AppDir);
+      Result := True;
+      exit;
+    end;
+    Log('Upgrade cleanup skipped: HKLM uninstall entry points to ' + PreviousAppDir);
+  end
+  else
+    Log('Upgrade cleanup skipped: no matching uninstall entry was found.');
+end;
