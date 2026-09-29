@@ -100,7 +100,7 @@ begin
   end;
   if SuppressibleMsgBox(
        'Also remove all settings and data {#MyAppName} created in its'
-       + #13#10 + 'install folder (configuration, keys, logs, and any'
+       + ' install folder (configuration, keys, logs, and any'
        + ' files it saved there)?',
        mbConfirmation, MB_YESNO, IDNO) <> IDYES then
     exit;
