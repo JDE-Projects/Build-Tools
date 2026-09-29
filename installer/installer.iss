@@ -84,10 +84,19 @@ begin
   AppDir := ExpandConstant('{app}');
   if not DirExists(AppDir) then
     exit;
-  if MsgBox('Also remove all settings and data {#MyAppName} created in its'
-            + #13#10 + 'install folder (configuration, keys, logs, and any'
-            + ' files it saved there)?',
-            mbConfirmation, MB_YESNO) <> IDYES then
+  { A silent uninstall (/SILENT or /VERYSILENT, which is how WinGet and the
+    recorded quiet uninstall command run it) never stops to ask: it keeps the
+    user's data. }
+  if UninstallSilent then
+  begin
+    Log('Silent uninstall: keeping settings and data in ' + AppDir);
+    exit;
+  end;
+  if SuppressibleMsgBox(
+       'Also remove all settings and data {#MyAppName} created in its'
+       + #13#10 + 'install folder (configuration, keys, logs, and any'
+       + ' files it saved there)?',
+       mbConfirmation, MB_YESNO, IDNO) <> IDYES then
     exit;
 
   if FindFirst(AppDir + '\*', FindRec) then
