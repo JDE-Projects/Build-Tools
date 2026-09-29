@@ -62,7 +62,9 @@ Filename: "{app}\{#MyExeName}"; Description: "Launch {#MyAppName}"; Flags: nowai
 [Code]
 { The app writes its runtime files (config, keys, logs, any data folders) next
   to the exe, so Inno's uninstaller leaves them behind. After the normal
-  uninstall, offer to remove anything still in the install folder.
+  uninstall, offer to remove anything still in the install folder. Log each
+  deletion failure, and if anything remains, report the actual entries the
+  user must remove by hand.
 
   We delete every leftover EXCEPT the uninstaller's own files (unins*). By this
   step Inno has already removed its own files (it runs from a temp copy) and has
@@ -73,7 +75,8 @@ Filename: "{app}\{#MyExeName}"; Description: "Launch {#MyAppName}"; Flags: nowai
   else remains) both the data and the folder stay put. }
 procedure CurUninstallStepChanged(CurStep: TUninstallStep);
 var
-  AppDir, Item: string;
+  AppDir, Item, LeftoverNames, MessageText: string;
+  LeftoverCount: Integer;
   FindRec: TFindRec;
 begin
   if CurStep <> usPostUninstall then
@@ -96,9 +99,15 @@ begin
         continue;                              { leave the running uninstaller }
       Item := AppDir + '\' + FindRec.Name;
       if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
-        DelTree(Item, True, True, True)
+      begin
+        if not DelTree(Item, True, True, True) then
+          Log('Could not remove directory: ' + Item);
+      end
       else
-        DeleteFile(Item);
+      begin
+        if not DeleteFile(Item) then
+          Log('Could not remove file: ' + Item);
+      end;
     until not FindNext(FindRec);
   finally
     FindClose(FindRec);
@@ -107,4 +116,39 @@ begin
   { Now that the leftovers are gone, remove the empty install folder that Inno
     left behind (see note above). No-op if anything still remains. }
   RemoveDir(AppDir);
+  if not DirExists(AppDir) then
+    exit;
+
+  LeftoverNames := '';
+  LeftoverCount := 0;
+  if FindFirst(AppDir + '\*', FindRec) then
+  try
+    repeat
+      if (FindRec.Name = '.') or (FindRec.Name = '..') then
+        continue;
+      LeftoverCount := LeftoverCount + 1;
+      Log('Uninstall cleanup left: ' + AppDir + '\' + FindRec.Name);
+      if LeftoverCount <= 10 then
+      begin
+        if LeftoverNames <> '' then
+          LeftoverNames := LeftoverNames + #13#10;
+        LeftoverNames := LeftoverNames + FindRec.Name;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+
+  MessageText := 'Could not remove the install folder:' + #13#10 + AppDir;
+  if LeftoverNames <> '' then
+    MessageText := MessageText + #13#10 + #13#10 + 'Items still there:'
+      + #13#10 + LeftoverNames;
+  if LeftoverCount > 10 then
+    MessageText := MessageText + #13#10 + 'and ' + IntToStr(LeftoverCount - 10)
+      + ' more';
+  MessageText := MessageText + #13#10 + #13#10
+    + 'Delete this folder by hand. Close the app first, or restart Windows if needed.';
+  Log(MessageText);
+  SuppressibleMsgBox(MessageText, mbError, MB_OK, IDOK);
 end;
+
