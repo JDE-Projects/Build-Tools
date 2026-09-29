@@ -634,6 +634,8 @@ kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
 kernel32.TerminateProcess.restype = wintypes.BOOL
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.GetProcessId.argtypes = [wintypes.HANDLE]
+kernel32.GetProcessId.restype = wintypes.DWORD
 kernel32.SetHandleInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
 kernel32.SetHandleInformation.restype = wintypes.BOOL
 ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
@@ -1315,6 +1317,7 @@ def main(argv: list[str]) -> int:
         # fixture, kept only so their handles get closed at the end.
         entry_h_procs: list[wintypes.HANDLE] = []
         all_h_procs: list[wintypes.HANDLE] = []
+        known_pids: set[int] = set()
         port = None
 
         try:
@@ -1351,7 +1354,7 @@ def main(argv: list[str]) -> int:
                     out_fd, out_handle = open_inheritable_log_handle(stdout_log)
                     err_fd, err_handle = open_inheritable_log_handle(stderr_log)
                     try:
-                        _fixture_pid, fixture_h_process = launch_suspended_in_job(
+                        fixture_pid, fixture_h_process = launch_suspended_in_job(
                             job,
                             [interpreter, str(fixture_path)],
                             app_dir,
@@ -1362,6 +1365,7 @@ def main(argv: list[str]) -> int:
                     finally:
                         os.close(out_fd)
                         os.close(err_fd)
+                    known_pids.add(fixture_pid)
                     all_h_procs.append(fixture_h_process)
                     fixture_json = read_first_json_line(stdout_log, LAUNCH_TIMEOUT_S)
 
@@ -1369,6 +1373,7 @@ def main(argv: list[str]) -> int:
                 env["QTWEBENGINE_REMOTE_DEBUGGING"] = str(port)
 
                 pid, h_process = launch_suspended_in_job(job, [interpreter, str(entry_path)], app_dir, env)
+                known_pids.add(pid)
                 entry_h_procs.append(h_process)
                 all_h_procs.append(h_process)
 
@@ -1441,31 +1446,38 @@ def main(argv: list[str]) -> int:
                     print("FAIL could not find the app window to capture")
                     capture_ok = False
 
-                teardown = _close_app_and_verify(job, job_pids, entry_h_procs, plan["window_title"], port, hwnd)
-                job = None  # _close_app_and_verify always closes the job before returning
+                known_pids.update(get_job_pids(job))
+                closing_job, job = job, None
+                teardown = _close_app_and_verify(
+                    closing_job, job_pids, entry_h_procs, plan["window_title"], port, hwnd
+                )
                 if teardown["cleanup_verified"]:
                     write_teardown_marker(run_dir)
 
                 checks_ok = bool(checks) and passed == len(checks) and not results.get("error")
                 return compute_exit_code(teardown["cleanup_verified"], checks_ok, capture_ok, teardown["ok"])
 
-            except Exception as exc:
-                if isinstance(exc, SetupError):
+            except (Exception, KeyboardInterrupt) as exc:
+                if isinstance(exc, KeyboardInterrupt):
+                    print("ERROR: interrupted (Ctrl+C)", file=sys.stderr)
+                elif isinstance(exc, SetupError):
                     print(f"ERROR: {exc}", file=sys.stderr)
                 else:
                     print(f"ERROR: {exc!r}", file=sys.stderr)
-                job, cleanup_verified = _report_cleanup_after_error(job, port)
+                job, cleanup_verified = _report_cleanup_after_error(job, port, known_pids, all_h_procs)
                 if cleanup_verified:
                     write_teardown_marker(run_dir)
                 return 2
             finally:
                 _cleanup(job, all_h_procs)
-        except Exception as exc:
-            if isinstance(exc, SetupError):
+        except (Exception, KeyboardInterrupt) as exc:
+            if isinstance(exc, KeyboardInterrupt):
+                print("ERROR: interrupted (Ctrl+C)", file=sys.stderr)
+            elif isinstance(exc, SetupError):
                 print(f"ERROR: {exc}", file=sys.stderr)
             else:
                 print(f"ERROR: {exc!r}", file=sys.stderr)
-            job, cleanup_verified = _report_cleanup_after_error(job, port)
+            job, cleanup_verified = _report_cleanup_after_error(job, port, known_pids, all_h_procs)
             if cleanup_verified:
                 write_teardown_marker(run_dir)
             return 2
@@ -1523,11 +1535,10 @@ def _close_app_and_verify(
     closed, no survivor PID, port no longer listening: this is what gates
     writing the teardown marker) and "ok" (cleanup_verified plus the app
     window was actually found, the overall pass/fail signal)."""
-    found_window = hwnd is not None or find_window_for_pids(job_pids, window_title) is not None
-    if hwnd is None:
-        hwnd = find_window_for_pids(job_pids, window_title)
-
     try:
+        found_window = hwnd is not None or find_window_for_pids(job_pids, window_title) is not None
+        if hwnd is None:
+            hwnd = find_window_for_pids(job_pids, window_title)
         if hwnd is not None:
             close_window(hwnd)
             exited = _wait_for(lambda: all(not process_is_running(h) for h in entry_h_procs), CLOSE_TIMEOUT_S)
@@ -1558,24 +1569,49 @@ def _close_app_and_verify(
     return {"ok": ok, "cleanup_verified": cleanup_verified}
 
 
-def _report_cleanup_after_error(job, port: int | None):
+def _report_cleanup_after_error(job, port: int | None, known_pids: set[int], h_procs: list):
     """Runs after main's setup/run code raised, once the run is already
-    being abandoned: closes the job if one exists (killing anything it still
-    holds) and reports whether that actually cleaned everything up, the same
-    way a successful run does. Returns (None, cleanup_verified): the caller
+    being abandoned: records all known PIDs, adds a final job snapshot when
+    the job is still open, then closes that job. It verifies held launch
+    handles directly and job-only child PIDs by number, plus the port when
+    one was assigned. Returns (None, cleanup_verified): the caller
     unconditionally overwrites its `job` variable with the first element, so
     _cleanup does not close the job a second time, and uses the second
-    element to decide whether the teardown marker may be written."""
-    if job is None:
+    element to decide whether the teardown marker may be written. With no
+    job, known PIDs, or handles, there is nothing to verify. A second Ctrl+C
+    anywhere in here still closes the job (once) and reports cleanup as
+    unverified, so the caller never sees the job handle again."""
+    if job is None and not known_pids and not h_procs:
         return None, True
-    try:
-        pids = get_job_pids(job)
-    except SetupError:
-        pids = set()
-    kernel32.CloseHandle(job)
 
-    survivors = _survivors(pids, SURVIVOR_TIMEOUT_S)
-    still_listening = port_is_listening(port, run_netstat()) if port is not None else False
+    pids = set(known_pids)
+    try:
+        if job is not None:
+            try:
+                pids.update(get_job_pids(job))
+            except SetupError:
+                pass
+    except KeyboardInterrupt:
+        return None, False
+    finally:
+        if job is not None:
+            kernel32.CloseHandle(job)
+
+    try:
+        held_pids = {kernel32.GetProcessId(handle) for handle in h_procs}
+        child_pids = pids - held_pids
+        _wait_for(
+            lambda: all(not process_is_running(handle) for handle in h_procs)
+            and all(pid_is_gone(pid) for pid in child_pids),
+            SURVIVOR_TIMEOUT_S,
+        )
+        survivors = sorted(
+            [pid for pid in child_pids if not pid_is_gone(pid)]
+            + [kernel32.GetProcessId(handle) for handle in h_procs if process_is_running(handle)]
+        )
+        still_listening = port_is_listening(port, run_netstat()) if port is not None else False
+    except KeyboardInterrupt:
+        return None, False
     cleanup_verified = not survivors and not still_listening
     if not cleanup_verified:
         detail = []

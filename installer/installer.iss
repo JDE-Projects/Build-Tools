@@ -51,6 +51,12 @@ Source: "THIRD-PARTY-LICENSES.txt";  DestDir: "{app}"; Flags: ignoreversion skip
 Source: "LICENSE.LGPL-3.0.txt";      DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "LICENSE.GPL-3.0.txt";       DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
+[InstallDelete]
+; Remove libraries that a newer build no longer ships, which otherwise stay forever.
+; Apps keep all user data next to the exe and never inside _internal. This delete is
+; not undone if installation fails or is cancelled partway; running Setup again repairs it.
+Type: filesandordirs; Name: "{app}\_internal"; Check: IsUpgradeOfThisApp
+
 [Icons]
 Name: "{group}\{#MyAppName}";           Filename: "{app}\{#MyExeName}"
 Name: "{autodesktop}\{#MyAppName}";     Filename: "{app}\{#MyExeName}"; Tasks: desktopicon
@@ -62,7 +68,9 @@ Filename: "{app}\{#MyExeName}"; Description: "Launch {#MyAppName}"; Flags: nowai
 [Code]
 { The app writes its runtime files (config, keys, logs, any data folders) next
   to the exe, so Inno's uninstaller leaves them behind. After the normal
-  uninstall, offer to remove anything still in the install folder.
+  uninstall, offer to remove anything still in the install folder. Log each
+  deletion failure, and if anything remains, report the actual entries the
+  user must remove by hand.
 
   We delete every leftover EXCEPT the uninstaller's own files (unins*). By this
   step Inno has already removed its own files (it runs from a temp copy) and has
@@ -73,7 +81,8 @@ Filename: "{app}\{#MyExeName}"; Description: "Launch {#MyAppName}"; Flags: nowai
   else remains) both the data and the folder stay put. }
 procedure CurUninstallStepChanged(CurStep: TUninstallStep);
 var
-  AppDir, Item: string;
+  AppDir, Item, LeftoverNames, MessageText: string;
+  LeftoverCount: Integer;
   FindRec: TFindRec;
 begin
   if CurStep <> usPostUninstall then
@@ -81,10 +90,19 @@ begin
   AppDir := ExpandConstant('{app}');
   if not DirExists(AppDir) then
     exit;
-  if MsgBox('Also remove all settings and data {#MyAppName} created in its'
-            + #13#10 + 'install folder (configuration, keys, logs, and any'
-            + ' files it saved there)?',
-            mbConfirmation, MB_YESNO) <> IDYES then
+  { A silent uninstall (/SILENT or /VERYSILENT, which is how WinGet and the
+    recorded quiet uninstall command run it) never stops to ask: it keeps the
+    user's data. }
+  if UninstallSilent then
+  begin
+    Log('Silent uninstall: keeping settings and data in ' + AppDir);
+    exit;
+  end;
+  if SuppressibleMsgBox(
+       'Also remove all settings and data {#MyAppName} created in its'
+       + ' install folder (configuration, keys, logs, and any'
+       + ' files it saved there)?',
+       mbConfirmation, MB_YESNO, IDNO) <> IDYES then
     exit;
 
   if FindFirst(AppDir + '\*', FindRec) then
@@ -96,9 +114,15 @@ begin
         continue;                              { leave the running uninstaller }
       Item := AppDir + '\' + FindRec.Name;
       if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
-        DelTree(Item, True, True, True)
+      begin
+        if not DelTree(Item, True, True, True) then
+          Log('Could not remove directory: ' + Item);
+      end
       else
-        DeleteFile(Item);
+      begin
+        if not DeleteFile(Item) then
+          Log('Could not remove file: ' + Item);
+      end;
     until not FindNext(FindRec);
   finally
     FindClose(FindRec);
@@ -107,4 +131,90 @@ begin
   { Now that the leftovers are gone, remove the empty install folder that Inno
     left behind (see note above). No-op if anything still remains. }
   RemoveDir(AppDir);
+  if not DirExists(AppDir) then
+    exit;
+
+  LeftoverNames := '';
+  LeftoverCount := 0;
+  if FindFirst(AppDir + '\*', FindRec) then
+  try
+    repeat
+      if (FindRec.Name = '.') or (FindRec.Name = '..') then
+        continue;
+      LeftoverCount := LeftoverCount + 1;
+      Log('Uninstall cleanup left: ' + AppDir + '\' + FindRec.Name);
+      if LeftoverCount <= 10 then
+      begin
+        if LeftoverNames <> '' then
+          LeftoverNames := LeftoverNames + #13#10;
+        LeftoverNames := LeftoverNames + FindRec.Name;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+
+  MessageText := 'Could not remove the install folder:' + #13#10 + AppDir;
+  if LeftoverNames <> '' then
+    MessageText := MessageText + #13#10 + #13#10 + 'Items still there:'
+      + #13#10 + LeftoverNames;
+  if LeftoverCount > 10 then
+    MessageText := MessageText + #13#10 + 'and ' + IntToStr(LeftoverCount - 10)
+      + ' more';
+  MessageText := MessageText + #13#10 + #13#10
+    + 'Delete this folder by hand. Close the app first, or restart Windows if needed.';
+  Log(MessageText);
+  SuppressibleMsgBox(MessageText, mbError, MB_OK, IDOK);
+end;
+
+function PathsMatch(const FirstPath, SecondPath: String): Boolean;
+var
+  NormalizedFirstPath, NormalizedSecondPath: String;
+begin
+  NormalizedFirstPath := FirstPath;
+  NormalizedSecondPath := SecondPath;
+  while (Length(NormalizedFirstPath) > 0)
+    and (Copy(NormalizedFirstPath, Length(NormalizedFirstPath), 1) = '\') do
+    Delete(NormalizedFirstPath, Length(NormalizedFirstPath), 1);
+  while (Length(NormalizedSecondPath) > 0)
+    and (Copy(NormalizedSecondPath, Length(NormalizedSecondPath), 1) = '\') do
+    Delete(NormalizedSecondPath, Length(NormalizedSecondPath), 1);
+  Result := CompareText(NormalizedFirstPath, NormalizedSecondPath) = 0;
+end;
+
+function IsUpgradeOfThisApp: Boolean;
+var
+  AppDir, PreviousAppDir, UninstallKey: String;
+begin
+  Result := False;
+  AppDir := ExpandConstant('{app}');
+  UninstallKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppId}_is1';
+
+  if RegQueryStringValue(HKEY_CURRENT_USER, UninstallKey,
+       'Inno Setup: App Path', PreviousAppDir) then
+  begin
+    if PathsMatch(PreviousAppDir, AppDir) then
+    begin
+      Log('Upgrade cleanup enabled: HKCU uninstall entry matches ' + AppDir);
+      Result := True;
+      exit;
+    end;
+    Log('Upgrade cleanup skipped: HKCU uninstall entry points to ' + PreviousAppDir);
+  end
+  else
+    Log('Upgrade cleanup: HKCU uninstall entry or app path value was not found.');
+
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE, UninstallKey,
+       'Inno Setup: App Path', PreviousAppDir) then
+  begin
+    if PathsMatch(PreviousAppDir, AppDir) then
+    begin
+      Log('Upgrade cleanup enabled: HKLM uninstall entry matches ' + AppDir);
+      Result := True;
+      exit;
+    end;
+    Log('Upgrade cleanup skipped: HKLM uninstall entry points to ' + PreviousAppDir);
+  end
+  else
+    Log('Upgrade cleanup skipped: no matching uninstall entry was found.');
 end;

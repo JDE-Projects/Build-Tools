@@ -134,9 +134,10 @@ verified but one of those failed, and 2 whenever
 cleanup could not be verified (this always wins over a check result) or any
 setup problem came up first (bad manifest, app already running, `git`
 missing or the repo not a work tree, the debug port never came up, a Node or
-process-launch failure, or anything else unexpected). Every exception
-`drive.py` can raise is caught, reported, and run through the same verified
-teardown before the process exits, so a crash never skips cleanup.
+process-launch failure, or anything else unexpected). Errors and Ctrl+C are
+reported and go through the same verified teardown before the process exits.
+A second Ctrl+C during that cleanup wait stops verification, so no teardown
+marker is written and `drive.py cleanup` refuses that run folder.
 
 ## The manifest: `tools/ui_check/ui_drive.json`
 
