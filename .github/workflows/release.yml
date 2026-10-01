@@ -184,5 +184,18 @@ jobs:
       - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: '${{ inputs.app_name }}-*'
+          fail_on_unmatched_files: true
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}   # rc/beta tags never become "Latest"
+          # Upload into a draft and publish in the next step. With immutable
+          # releases on, no file can be added once a release is published, and
+          # this action publishes a prerelease before uploading its files.
+          draft: true
+      - name: Publish release
+        # gh needs the token and repository passed in: this job has no checkout,
+        # and the token given to the step above does not carry over.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --draft=false
