@@ -18,6 +18,7 @@ on:
     inputs:
       python_version: { type: string, default: '3.14' }  # match release.yml's default
       entry_script:   { type: string, default: '' }      # tool's main .py (e.g. simple_ssh_tool.py); enables the import check when set
+      verify_runtime_lock: { type: boolean, default: false } # require requirements.txt to match requirements.in (uv-compiled for Windows and python_version, committed versions kept, hashes re-fetched), and install it with --require-hashes
 
 jobs:
   check:
@@ -40,9 +41,33 @@ jobs:
       - name: Install deps
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) { pip install -r requirements.txt }
-          pip install -r _buildtools/templates/dev/requirements.txt
+          # No pip upgrade: the pip that ships with this Python does the
+          # install, matching release.yml. Both versions are printed so the
+          # log records what ran.
+          python --version
+          python -m pip --version
+          if ("${{ inputs.verify_runtime_lock }}" -eq "true") {
+            # Every package, including the ones pulled in, is pinned with a
+            # hash. build-constraints.txt, when present, pins the build helper
+            # (setuptools) pip downloads to build a package published only as
+            # source code.
+            $buildArgs = @()
+            if (Test-Path build-constraints.txt) { $buildArgs = @("--build-constraint", "build-constraints.txt") }
+            python -m pip install --require-hashes @buildArgs -r requirements.txt
+            if ($LASTEXITCODE -ne 0) { throw "Installing requirements.txt failed" }
+          } elseif (Test-Path requirements.txt) {
+            python -m pip install -r requirements.txt
+            if ($LASTEXITCODE -ne 0) { throw "Installing requirements.txt failed" }
+          }
+          python -m pip install -r _buildtools/templates/dev/requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw "Installing the dev tooling failed" }
+      - name: Verify runtime lock
+        if: ${{ inputs.verify_runtime_lock }}
+        shell: bash
+        env:
+          RUNTIME_LOCK_PYTHON_VERSION: ${{ inputs.python_version }}
+          RUNTIME_LOCK_PLATFORM: x86_64-pc-windows-msvc
+        run: bash _buildtools/scripts/checks/verify_runtime_lock.sh
       - name: Lint (ruff)
         shell: pwsh
         run: |
