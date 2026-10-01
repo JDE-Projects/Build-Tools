@@ -20,10 +20,16 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="bash not found on PATH")
 
 
 def run_script(
-    requirements_in: Path, requirements_txt: Path, regenerated_file: Path
+    requirements_in: Path,
+    requirements_txt: Path,
+    regenerated_file: Path,
+    extra_env: dict | None = None,
 ) -> subprocess.CompletedProcess:
     env = dict(os.environ)
+    env.pop("RUNTIME_LOCK_PYTHON_VERSION", None)
+    env.pop("RUNTIME_LOCK_PLATFORM", None)
     env["RUNTIME_LOCK_REGENERATED_FILE"] = str(regenerated_file)
+    env.update(extra_env or {})
     return subprocess.run(
         [BASH, str(SCRIPT), str(requirements_in), str(requirements_txt)],
         capture_output=True,
@@ -68,3 +74,34 @@ def test_missing_requirements_txt_fails():
         FIXTURES / "requirements_matching.txt",
     )
     assert result.returncode != 0
+
+
+def test_failure_hint_uses_default_universal_command():
+    result = run_script(
+        FIXTURES / "requirements.in",
+        FIXTURES / "requirements_committed_stale.txt",
+        FIXTURES / "requirements_matching.txt",
+    )
+    assert result.returncode != 0
+    assert (
+        "uv pip compile --universal --generate-hashes --python-version 3.10"
+        in result.stderr
+    )
+
+
+def test_failure_hint_follows_platform_and_python_settings():
+    result = run_script(
+        FIXTURES / "requirements.in",
+        FIXTURES / "requirements_committed_stale.txt",
+        FIXTURES / "requirements_matching.txt",
+        extra_env={
+            "RUNTIME_LOCK_PYTHON_VERSION": "3.14",
+            "RUNTIME_LOCK_PLATFORM": "x86_64-pc-windows-msvc",
+        },
+    )
+    assert result.returncode != 0
+    assert (
+        "uv pip compile --python-platform x86_64-pc-windows-msvc"
+        " --generate-hashes --python-version 3.14" in result.stderr
+    )
+    assert "--universal" not in result.stderr

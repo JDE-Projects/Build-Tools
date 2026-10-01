@@ -16,16 +16,29 @@
 #   requirements_in  defaults to ./requirements.in
 #   requirements_txt defaults to ./requirements.txt
 #
+# Optional environment settings choose what the lock is resolved for:
+#   RUNTIME_LOCK_PYTHON_VERSION  Python version to resolve for. Default 3.10,
+#                                the server tools' deployment target.
+#   RUNTIME_LOCK_PLATFORM        uv target platform, for example
+#                                x86_64-pc-windows-msvc for the Windows desktop
+#                                tools. Unset or empty resolves --universal, a
+#                                lock valid on every platform.
+#
 # Regeneration is pinned to a single reproducible command, run with a pinned
 # uv version:
 #   uv version:      0.12.17
 #   install command: pip install uv==0.12.17
-#   compile command: uv pip compile --universal --generate-hashes \
-#                       --python-version 3.10 requirements.in -o <tempfile>
+#   compile command (default settings):
+#     uv pip compile --universal --generate-hashes \
+#       --python-version 3.10 requirements.in -o <tempfile>
+#   compile command (Windows desktop tools on Python 3.14):
+#     uv pip compile --python-platform x86_64-pc-windows-msvc --generate-hashes \
+#       --python-version 3.14 requirements.in -o <tempfile>
 # where <tempfile> starts as a copy of requirements.txt with its hash lines
 # removed (uv reads existing pins from the output file and keeps them).
 # A maintainer regenerating the lock by hand should install that exact uv
-# version and run that exact command from the repo root.
+# version and run the matching command from the repo root. When the check
+# fails, the script prints the exact command for the settings it ran with.
 #
 # Test-only seam: set RUNTIME_LOCK_REGENERATED_FILE to a path and this script
 # skips installing uv and compiling, using that file as the "regenerated"
@@ -36,6 +49,12 @@ set -uo pipefail
 REQUIREMENTS_IN="${1:-requirements.in}"
 REQUIREMENTS_TXT="${2:-requirements.txt}"
 UV_VERSION="0.12.17"
+PYTHON_VERSION="${RUNTIME_LOCK_PYTHON_VERSION:-3.10}"
+if [ -n "${RUNTIME_LOCK_PLATFORM:-}" ]; then
+  TARGET_ARGS=(--python-platform "$RUNTIME_LOCK_PLATFORM")
+else
+  TARGET_ARGS=(--universal)
+fi
 
 if [ ! -f "$REQUIREMENTS_IN" ]; then
   echo "verify_runtime_lock: missing $REQUIREMENTS_IN" >&2
@@ -81,7 +100,8 @@ else
     echo "verify_runtime_lock: failed to seed from $REQUIREMENTS_TXT" >&2
     exit 1
   }
-  uv pip compile --universal --generate-hashes --python-version 3.10 \
+  uv pip compile "${TARGET_ARGS[@]}" --generate-hashes \
+    --python-version "$PYTHON_VERSION" \
     "$REQUIREMENTS_IN" -o "$REGENERATED_FILE" || {
     echo "verify_runtime_lock: uv pip compile failed" >&2
     exit 1
@@ -109,5 +129,5 @@ diff -u <(echo "$COMMITTED_BODY") <(echo "$REGENERATED_BODY") >&2 || true
 echo >&2
 echo "Regenerate the lock and commit it in the same PR:" >&2
 echo "  pip install uv==$UV_VERSION" >&2
-echo "  uv pip compile --universal --generate-hashes --python-version 3.10 requirements.in -o requirements.txt" >&2
+echo "  uv pip compile ${TARGET_ARGS[*]} --generate-hashes --python-version $PYTHON_VERSION requirements.in -o requirements.txt" >&2
 exit 1
