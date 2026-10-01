@@ -25,6 +25,12 @@ SCRIPT = REPO_ROOT / "scripts" / "checks" / "verify_runtime_lock.sh"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "runtime_lock"
 BASE_IN = FIXTURES / "requirements_uv_real.in"
 BASE_TXT = FIXTURES / "requirements_uv_real.txt"
+WINDOWS_IN = FIXTURES / "requirements_uv_windows.in"
+WINDOWS_TXT = FIXTURES / "requirements_uv_windows.txt"
+WINDOWS_SETTINGS = {
+    "RUNTIME_LOCK_PYTHON_VERSION": "3.14",
+    "RUNTIME_LOCK_PLATFORM": "x86_64-pc-windows-msvc",
+}
 UV_VERSION = "0.12.17"
 
 BASH = shutil.which("bash")
@@ -66,11 +72,16 @@ def uv_env(tmp_path_factory):
     return {"scripts_dir": scripts_dir, "cache_dir": cache_dir}
 
 
-def _run_script(uv_env, cwd: Path) -> subprocess.CompletedProcess:
+def _run_script(
+    uv_env, cwd: Path, extra_env: dict | None = None
+) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PATH"] = str(uv_env["scripts_dir"]) + os.pathsep + env.get("PATH", "")
     env["UV_CACHE_DIR"] = str(uv_env["cache_dir"])
     env.pop("RUNTIME_LOCK_REGENERATED_FILE", None)
+    env.pop("RUNTIME_LOCK_PYTHON_VERSION", None)
+    env.pop("RUNTIME_LOCK_PLATFORM", None)
+    env.update(extra_env or {})
     return subprocess.run(
         [BASH, str(SCRIPT)],
         cwd=str(cwd),
@@ -135,3 +146,30 @@ def test_hand_edited_indirect_version_fails(uv_env, tmp_path):
     result = _run_script(uv_env, project)
     assert result.returncode != 0
     assert "out of date" in result.stderr
+
+
+def _fresh_windows_project(tmp_path: Path) -> Path:
+    """Copy the Windows-only fixture pair in as requirements.in/.txt.
+
+    The fixture pins click, which needs colorama on Windows only, so a
+    Windows-only lock lists colorama with no platform marker while a
+    universal lock adds one. That difference shows which settings the
+    regeneration actually used.
+    """
+    shutil.copyfile(WINDOWS_IN, tmp_path / "requirements.in")
+    shutil.copyfile(WINDOWS_TXT, tmp_path / "requirements.txt")
+    return tmp_path
+
+
+def test_windows_lock_passes_with_windows_settings(uv_env, tmp_path):
+    project = _fresh_windows_project(tmp_path)
+    result = _run_script(uv_env, project, WINDOWS_SETTINGS)
+    assert result.returncode == 0, result.stderr
+
+
+def test_windows_lock_fails_with_default_universal_settings(uv_env, tmp_path):
+    project = _fresh_windows_project(tmp_path)
+    result = _run_script(uv_env, project)
+    assert result.returncode != 0
+    assert "out of date" in result.stderr
+    assert "sys_platform == 'win32'" in result.stderr
