@@ -52,13 +52,17 @@ jobs:
         run: bash _buildtools/scripts/checks/verify_dev_pins.sh
       - name: Install deps
         run: |
-          python -m pip install --upgrade pip
+          # No pip upgrade: the pip that ships with this Python does the
+          # install, matching the Windows workflows. Both versions are
+          # printed so the log records what ran.
+          python --version
+          python -m pip --version
           if [ "${{ inputs.verify_runtime_lock }}" = "true" ]; then
             python -m pip install --require-hashes -r requirements.txt
           else
-            if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+            if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           fi
-          pip install -r _buildtools/templates/dev/requirements.txt
+          python -m pip install -r _buildtools/templates/dev/requirements.txt
       - name: Verify runtime lock
         if: ${{ inputs.verify_runtime_lock }}
         run: bash _buildtools/scripts/checks/verify_runtime_lock.sh
