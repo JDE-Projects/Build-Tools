@@ -32,6 +32,11 @@ Signing facts worth not re-researching:
 5. CI and dev tooling versions (ruff, pytest) live in `templates/dev/requirements.txt`,
    not inline in workflow `run:` blocks, because Dependabot can't see a version
    string inside a shell command.
+6. Two limits are accepted on purpose. GitHub's build machine can run a different
+   Python 3.14 patch release from the local build PC; an app that ever needs an exact match
+   pins the patch in its workflow. setuptools, downloaded only to build
+   source-only packages, is pinned by version in `build-constraints.txt` but not
+   hash-checked.
 
 ## Dependabot PR review protocol
 
