@@ -47,7 +47,7 @@ SURVIVOR_TIMEOUT_S = 5      # waiting, after the job is closed, for its processe
 
 DEFAULT_SCENARIO_TIMEOUT_S = 60
 MIN_SCENARIO_TIMEOUT_S = 10
-MAX_SCENARIO_TIMEOUT_S = 600
+MAX_SCENARIO_TIMEOUT_S = 1200
 
 
 class ManifestError(Exception):
