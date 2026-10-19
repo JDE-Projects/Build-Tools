@@ -247,7 +247,7 @@ def test_timeout_s_too_low_is_rejected(tmp_path):
 def test_timeout_s_too_high_is_rejected(tmp_path):
     repo = make_repo(tmp_path)
     manifest = good_manifest()
-    manifest["scenarios"]["smoke"]["timeout_s"] = 601
+    manifest["scenarios"]["smoke"]["timeout_s"] = drive.MAX_SCENARIO_TIMEOUT_S + 1
     with pytest.raises(drive.ManifestError, match="timeout_s"):
         drive.validate_manifest(repo, manifest, "smoke")
 

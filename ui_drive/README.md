@@ -158,7 +158,7 @@ Inside `scenarios`, each entry needs:
 |---|---|---|
 | `script` | yes | Repo-relative path to the scenario's `.js` file |
 | `fixture` | no | Repo-relative path to a Python script that stands up test data (a throwaway server, sample files) before the app launches |
-| `timeout_s` | no | How many seconds the scenario gets to finish, from connecting to the page onward. Whole number, 10 to 600. Default 60 |
+| `timeout_s` | no | How many seconds the scenario gets to finish, from connecting to the page onward. Whole number, 10 to 1200. Default 60 |
 
 All paths in the manifest are repo-relative. Absolute paths, `..` segments,
 and anything that resolves outside the repo (including through a symlink)
