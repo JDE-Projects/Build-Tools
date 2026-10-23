@@ -258,10 +258,16 @@ async function signIn(devtools, config, timeoutMs) {
   await devtools.send("Page.navigate", { url });
   await loaded;
 
-  // Polled here rather than through pollUntilTrue, whose failure message
-  // quotes the expression: nothing from the signIn block is ever printed.
+  // Polled here rather than through pollUntilTrue, and evaluated through
+  // evaluateSignIn, because both of those other paths quote the expression
+  // in their errors: nothing from the signIn block is ever printed.
   const deadline = Date.now() + timeoutMs;
-  while (!(await devtools.evaluate(`!!document.querySelector(${fieldSelector})`))) {
+  while (
+    !(await devtools.evaluateSignIn(
+      `!!document.querySelector(${fieldSelector})`,
+      "signIn.passwordSelector is not a valid CSS selector"
+    ))
+  ) {
     if (Date.now() >= deadline) {
       fail(
         `the sign-in page showed no element matching signIn.passwordSelector ` +
