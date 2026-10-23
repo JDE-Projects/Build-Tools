@@ -169,6 +169,18 @@ class Devtools {
     return result.result?.value;
   }
 
+  // Runs a sign-in expression without echoing it in an error, because the
+  // expression can contain the configured throwaway password.
+  async evaluateSignIn(expression, errorMessage) {
+    const result = await this.send("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (result.exceptionDetails) throw new Error(errorMessage);
+    return result.result?.value;
+  }
+
   close() {
     try {
       this.ws.close();
@@ -187,6 +199,88 @@ async function pollUntilTrue(devtools, expression, timeoutMs, label) {
   fail(`${label} never became true within ${timeoutMs}ms: ${expression}`);
 }
 
+async function waitForSignIn(devtools, doneWhen, password, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // The page navigates away after a successful sign-in, and a check that
+    // lands mid-navigation fails without meaning anything, so try again.
+    try {
+      if (await devtools.evaluate(doneWhen)) return;
+    } catch {
+      // page was between documents
+    }
+    await sleep(200);
+  }
+  const alertText = (await devtools.evaluate(
+    "(() => document.querySelector('[role=alert], .error, #error')?.textContent?.trim() || '')()"
+  )).split(password).join("[redacted]");
+  fail(
+    `sign-in did not complete within ${timeoutMs}ms` +
+      (alertText ? `: ${alertText}` : "")
+  );
+}
+
+async function signIn(devtools, config, timeoutMs) {
+  const { url, passwordSelector, password, submitSelector, doneWhen } =
+    config.signIn;
+  const passwordField = JSON.stringify(passwordSelector);
+  const passwordValue = JSON.stringify(password);
+
+  const loaded = devtools.waitForEvent("Page.loadEventFired", timeoutMs);
+  await devtools.send("Page.navigate", { url });
+  await loaded;
+
+  await pollUntilTrue(
+    devtools,
+    `document.querySelector(${passwordField})`,
+    timeoutMs,
+    "sign-in password field"
+  );
+  await devtools.evaluateSignIn(
+    `(() => {
+      const field = document.querySelector(${passwordField});
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype, "value"
+      )?.set;
+      if (!field || !setter) throw new Error("password field is unavailable");
+      setter.call(field, ${passwordValue});
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    })()`,
+    "could not enter the sign-in password"
+  );
+
+  if (submitSelector) {
+    await devtools.evaluateSignIn(
+      `(() => {
+        const submitter = document.querySelector(${JSON.stringify(submitSelector)});
+        if (!submitter) throw new Error("submit element is unavailable");
+        submitter.click();
+      })()`,
+      "could not submit the sign-in form"
+    );
+  } else {
+    await devtools.evaluateSignIn(
+      `(() => {
+        const form = document.querySelector(${passwordField})?.closest("form");
+        if (!form) throw new Error("sign-in form is unavailable");
+        form.requestSubmit();
+      })()`,
+      "could not submit the sign-in form"
+    );
+  }
+
+  const defaultDoneWhen = `location.pathname !== ${JSON.stringify(
+    new URL(url).pathname
+  )}`;
+  await waitForSignIn(
+    devtools,
+    doneWhen ?? defaultDoneWhen,
+    password,
+    timeoutMs
+  );
+}
+
 async function main() {
   const configPath = process.argv[2];
   if (!configPath) fail("usage: node capture.mjs <config.json>");
@@ -197,6 +291,27 @@ async function main() {
   if (!config.url) fail("config needs a \"url\"");
   if (!Array.isArray(config.shots) || config.shots.length === 0) {
     fail("config needs a non-empty \"shots\" array");
+  }
+  if (config.signIn !== undefined) {
+    if (
+      !config.signIn ||
+      typeof config.signIn !== "object" ||
+      Array.isArray(config.signIn)
+    ) {
+      fail("config \"signIn\" must be an object");
+    }
+    if (typeof config.signIn.url !== "string" || !config.signIn.url) {
+      fail("config signIn needs a \"url\"");
+    }
+    if (
+      typeof config.signIn.passwordSelector !== "string" ||
+      !config.signIn.passwordSelector
+    ) {
+      fail("config signIn needs a \"passwordSelector\"");
+    }
+    if (typeof config.signIn.password !== "string" || !config.signIn.password) {
+      fail("config signIn needs a \"password\"");
+    }
   }
 
   const width = config.width ?? 1280;
@@ -245,6 +360,8 @@ async function main() {
       deviceScaleFactor: config.scale ?? 1,
       mobile: false,
     });
+
+    if (config.signIn) await signIn(devtools, config, timeoutMs);
 
     const loaded = devtools.waitForEvent("Page.loadEventFired", timeoutMs);
     await devtools.send("Page.navigate", { url: config.url });
