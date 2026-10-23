@@ -251,22 +251,28 @@ async function waitForSignIn(devtools, doneWhen, password, timeoutMs) {
 async function signIn(devtools, config, timeoutMs) {
   const { url, passwordSelector, password, submitSelector, doneWhen } =
     config.signIn;
-  const passwordField = JSON.stringify(passwordSelector);
+  const fieldSelector = JSON.stringify(passwordSelector);
   const passwordValue = JSON.stringify(password);
 
   const loaded = devtools.waitForEvent("Page.loadEventFired", timeoutMs);
   await devtools.send("Page.navigate", { url });
   await loaded;
 
-  await pollUntilTrue(
-    devtools,
-    `document.querySelector(${passwordField})`,
-    timeoutMs,
-    "sign-in password field"
-  );
+  // Polled here rather than through pollUntilTrue, whose failure message
+  // quotes the expression: nothing from the signIn block is ever printed.
+  const deadline = Date.now() + timeoutMs;
+  while (!(await devtools.evaluate(`!!document.querySelector(${fieldSelector})`))) {
+    if (Date.now() >= deadline) {
+      fail(
+        `the sign-in page showed no element matching signIn.passwordSelector ` +
+          `within ${timeoutMs}ms`
+      );
+    }
+    await sleep(200);
+  }
   await devtools.evaluateSignIn(
     `(() => {
-      const field = document.querySelector(${passwordField});
+      const field = document.querySelector(${fieldSelector});
       const setter = Object.getOwnPropertyDescriptor(
         HTMLInputElement.prototype, "value"
       )?.set;
@@ -290,7 +296,7 @@ async function signIn(devtools, config, timeoutMs) {
   } else {
     await devtools.evaluateSignIn(
       `(() => {
-        const form = document.querySelector(${passwordField})?.closest("form");
+        const form = document.querySelector(${fieldSelector})?.closest("form");
         if (!form) throw new Error("sign-in form is unavailable");
         form.requestSubmit();
       })()`,
