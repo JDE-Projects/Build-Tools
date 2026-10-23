@@ -25,9 +25,37 @@ const BROWSER_CANDIDATES = [
   "/usr/bin/chromium",
 ];
 
+// A problem the user can act on. Thrown rather than exiting on the spot, so
+// the browser is always shut down and its profile folder removed first.
+class CaptureError extends Error {}
+
 function fail(message) {
-  console.error(`ERROR: ${message}`);
-  process.exit(1);
+  throw new CaptureError(message);
+}
+
+// Shuts the browser down so its profile folder is no longer in use when it is
+// deleted. Asks over the DevTools protocol first: on Windows the process this
+// script started can hand over to another and exit, so killing it alone can
+// leave the real browser running. Killing is the fallback.
+async function stopBrowser(browser, browserWsUrl, timeoutMs) {
+  if (browserWsUrl) {
+    try {
+      const control = await Devtools.connect(browserWsUrl);
+      await Promise.race([control.send("Browser.close"), sleep(timeoutMs)]);
+      control.close();
+    } catch {
+      // browser already gone or not answering, so fall back to killing it
+    }
+  }
+  if (browser.exitCode !== null || browser.signalCode !== null) return;
+  await new Promise((done) => {
+    const timer = setTimeout(done, timeoutMs);
+    browser.once("exit", () => {
+      clearTimeout(timer);
+      done();
+    });
+    browser.kill();
+  });
 }
 
 function findBrowser(configured) {
@@ -343,10 +371,11 @@ async function main() {
   );
 
   let devtools = null;
+  let browserWsUrl = null;
   const written = [];
   try {
     const port = await waitForDebugPort(profileDir, timeoutMs);
-    await waitForEndpoint(port, timeoutMs);
+    browserWsUrl = (await waitForEndpoint(port, timeoutMs)).webSocketDebuggerUrl;
     const wsUrl = await findPageTarget(port, timeoutMs);
     devtools = await Devtools.connect(wsUrl);
 
@@ -397,8 +426,20 @@ async function main() {
     }
   } finally {
     if (devtools) devtools.close();
-    browser.kill();
-    await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+    await stopBrowser(browser, browserWsUrl, 10000);
+    // The browser's helper processes can hold files for a moment after it
+    // exits, so the delete retries before giving up.
+    await rm(profileDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 300,
+    }).catch((err) => {
+      console.error(
+        `WARNING: could not remove the browser profile folder ${profileDir} ` +
+          `(${err.code || err.message}). Delete it by hand.`
+      );
+    });
   }
 
   if (written.length !== config.shots.length) {
@@ -409,4 +450,9 @@ async function main() {
   }
 }
 
-main().catch((err) => fail(err.stack || err.message));
+main().catch((err) => {
+  console.error(
+    `ERROR: ${err instanceof CaptureError ? err.message : err.stack || err.message}`
+  );
+  process.exit(1);
+});
