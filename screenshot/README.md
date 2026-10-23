@@ -39,6 +39,12 @@ python compose.py ../screenshots/app-light-dark.png shots/dark.png shots/light.p
   "width": 900,
   "height": 648,
   "outDir": "shots",
+  "signIn": {
+    "url": "http://127.0.0.1:3123/login",
+    "passwordSelector": "#password",
+    "password": "throwaway-password",
+    "submitSelector": "#loginForm button"
+  },
   "waitFor": "document.querySelector('.device-card')",
   "setup": "selectDevice(document.querySelector('.device-card').dataset.id)",
   "waitForData": "document.querySelector('#cpu-percent').textContent.trim()",
@@ -57,6 +63,12 @@ python compose.py ../screenshots/app-light-dark.png shots/dark.png shots/light.p
 | `outDir` | no | Where the per-shot PNGs go, relative to the config file. Default `shots` |
 | `settleMs` | no | Pause after each shot's script before capturing, default 400. A shot can override it |
 | `scale` | no | Pixel density, default 1. Use 2 for a high-resolution image |
+| `signIn` | no | Object that signs in before opening `url` |
+| `signIn.url` | yes, when `signIn` is present | Address of the sign-in page |
+| `signIn.passwordSelector` | yes, when `signIn` is present | CSS selector for the password field |
+| `signIn.password` | yes, when `signIn` is present | Throwaway password seeded by the generator, never a real one |
+| `signIn.submitSelector` | no | Element to click to submit. When omitted, the form containing the password field is submitted |
+| `signIn.doneWhen` | no | JavaScript polled until truthy after submission. The default waits until the pathname differs from the sign-in URL's pathname |
 | `waitFor` | no | JavaScript polled until truthy, before `setup` runs. Use it to wait for the page to be usable |
 | `setup` | no | JavaScript run once after `waitFor`, before any shot |
 | `waitForData` | no | JavaScript polled until truthy, after `setup`. Use it to wait for live data to arrive, so shots are never of an empty panel |
@@ -67,6 +79,9 @@ Both scripts stop with a message and a non-zero exit code on any problem: a
 missing browser, a wait that never came true, JavaScript that threw, or images
 that do not match in size. Nothing is composed from a partial run, so a broken
 capture cannot quietly produce a wrong README image.
+
+Sign-in cookies persist only in the throwaway browser profile that `capture.mjs`
+deletes at the end of the run.
 
 ## Fake data
 

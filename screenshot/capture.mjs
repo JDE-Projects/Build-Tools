@@ -25,9 +25,37 @@ const BROWSER_CANDIDATES = [
   "/usr/bin/chromium",
 ];
 
+// A problem the user can act on. Thrown rather than exiting on the spot, so
+// the browser is always shut down and its profile folder removed first.
+class CaptureError extends Error {}
+
 function fail(message) {
-  console.error(`ERROR: ${message}`);
-  process.exit(1);
+  throw new CaptureError(message);
+}
+
+// Shuts the browser down so its profile folder is no longer in use when it is
+// deleted. Asks over the DevTools protocol first: on Windows the process this
+// script started can hand over to another and exit, so killing it alone can
+// leave the real browser running. Killing is the fallback.
+async function stopBrowser(browser, browserWsUrl, timeoutMs) {
+  if (browserWsUrl) {
+    try {
+      const control = await Devtools.connect(browserWsUrl);
+      await Promise.race([control.send("Browser.close"), sleep(timeoutMs)]);
+      control.close();
+    } catch {
+      // browser already gone or not answering, so fall back to killing it
+    }
+  }
+  if (browser.exitCode !== null || browser.signalCode !== null) return;
+  await new Promise((done) => {
+    const timer = setTimeout(done, timeoutMs);
+    browser.once("exit", () => {
+      clearTimeout(timer);
+      done();
+    });
+    browser.kill();
+  });
 }
 
 function findBrowser(configured) {
@@ -169,6 +197,18 @@ class Devtools {
     return result.result?.value;
   }
 
+  // Runs a sign-in expression without echoing it in an error, because the
+  // expression can contain the configured throwaway password.
+  async evaluateSignIn(expression, errorMessage) {
+    const result = await this.send("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (result.exceptionDetails) throw new Error(errorMessage);
+    return result.result?.value;
+  }
+
   close() {
     try {
       this.ws.close();
@@ -187,6 +227,100 @@ async function pollUntilTrue(devtools, expression, timeoutMs, label) {
   fail(`${label} never became true within ${timeoutMs}ms: ${expression}`);
 }
 
+async function waitForSignIn(devtools, doneWhen, password, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // The page navigates away after a successful sign-in, and a check that
+    // lands mid-navigation fails without meaning anything, so try again.
+    try {
+      if (await devtools.evaluate(doneWhen)) return;
+    } catch {
+      // page was between documents
+    }
+    await sleep(200);
+  }
+  const alertText = (await devtools.evaluate(
+    "(() => document.querySelector('[role=alert], .error, #error')?.textContent?.trim() || '')()"
+  )).split(password).join("[redacted]");
+  fail(
+    `sign-in did not complete within ${timeoutMs}ms` +
+      (alertText ? `: ${alertText}` : "")
+  );
+}
+
+async function signIn(devtools, config, timeoutMs) {
+  const { url, passwordSelector, password, submitSelector, doneWhen } =
+    config.signIn;
+  const fieldSelector = JSON.stringify(passwordSelector);
+  const passwordValue = JSON.stringify(password);
+
+  const loaded = devtools.waitForEvent("Page.loadEventFired", timeoutMs);
+  await devtools.send("Page.navigate", { url });
+  await loaded;
+
+  // Polled here rather than through pollUntilTrue, and evaluated through
+  // evaluateSignIn, because both of those other paths quote the expression
+  // in their errors: nothing from the signIn block is ever printed.
+  const deadline = Date.now() + timeoutMs;
+  while (
+    !(await devtools.evaluateSignIn(
+      `!!document.querySelector(${fieldSelector})`,
+      "signIn.passwordSelector is not a valid CSS selector"
+    ))
+  ) {
+    if (Date.now() >= deadline) {
+      fail(
+        `the sign-in page showed no element matching signIn.passwordSelector ` +
+          `within ${timeoutMs}ms`
+      );
+    }
+    await sleep(200);
+  }
+  await devtools.evaluateSignIn(
+    `(() => {
+      const field = document.querySelector(${fieldSelector});
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype, "value"
+      )?.set;
+      if (!field || !setter) throw new Error("password field is unavailable");
+      setter.call(field, ${passwordValue});
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    })()`,
+    "could not enter the sign-in password"
+  );
+
+  if (submitSelector) {
+    await devtools.evaluateSignIn(
+      `(() => {
+        const submitter = document.querySelector(${JSON.stringify(submitSelector)});
+        if (!submitter) throw new Error("submit element is unavailable");
+        submitter.click();
+      })()`,
+      "could not submit the sign-in form"
+    );
+  } else {
+    await devtools.evaluateSignIn(
+      `(() => {
+        const form = document.querySelector(${fieldSelector})?.closest("form");
+        if (!form) throw new Error("sign-in form is unavailable");
+        form.requestSubmit();
+      })()`,
+      "could not submit the sign-in form"
+    );
+  }
+
+  const defaultDoneWhen = `location.pathname !== ${JSON.stringify(
+    new URL(url).pathname
+  )}`;
+  await waitForSignIn(
+    devtools,
+    doneWhen ?? defaultDoneWhen,
+    password,
+    timeoutMs
+  );
+}
+
 async function main() {
   const configPath = process.argv[2];
   if (!configPath) fail("usage: node capture.mjs <config.json>");
@@ -197,6 +331,27 @@ async function main() {
   if (!config.url) fail("config needs a \"url\"");
   if (!Array.isArray(config.shots) || config.shots.length === 0) {
     fail("config needs a non-empty \"shots\" array");
+  }
+  if (config.signIn !== undefined) {
+    if (
+      !config.signIn ||
+      typeof config.signIn !== "object" ||
+      Array.isArray(config.signIn)
+    ) {
+      fail("config \"signIn\" must be an object");
+    }
+    if (typeof config.signIn.url !== "string" || !config.signIn.url) {
+      fail("config signIn needs a \"url\"");
+    }
+    if (
+      typeof config.signIn.passwordSelector !== "string" ||
+      !config.signIn.passwordSelector
+    ) {
+      fail("config signIn needs a \"passwordSelector\"");
+    }
+    if (typeof config.signIn.password !== "string" || !config.signIn.password) {
+      fail("config signIn needs a \"password\"");
+    }
   }
 
   const width = config.width ?? 1280;
@@ -228,10 +383,11 @@ async function main() {
   );
 
   let devtools = null;
+  let browserWsUrl = null;
   const written = [];
   try {
     const port = await waitForDebugPort(profileDir, timeoutMs);
-    await waitForEndpoint(port, timeoutMs);
+    browserWsUrl = (await waitForEndpoint(port, timeoutMs)).webSocketDebuggerUrl;
     const wsUrl = await findPageTarget(port, timeoutMs);
     devtools = await Devtools.connect(wsUrl);
 
@@ -245,6 +401,8 @@ async function main() {
       deviceScaleFactor: config.scale ?? 1,
       mobile: false,
     });
+
+    if (config.signIn) await signIn(devtools, config, timeoutMs);
 
     const loaded = devtools.waitForEvent("Page.loadEventFired", timeoutMs);
     await devtools.send("Page.navigate", { url: config.url });
@@ -280,8 +438,20 @@ async function main() {
     }
   } finally {
     if (devtools) devtools.close();
-    browser.kill();
-    await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+    await stopBrowser(browser, browserWsUrl, 10000);
+    // The browser's helper processes can hold files for a moment after it
+    // exits, so the delete retries before giving up.
+    await rm(profileDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 300,
+    }).catch((err) => {
+      console.error(
+        `WARNING: could not remove the browser profile folder ${profileDir} ` +
+          `(${err.code || err.message}). Delete it by hand.`
+      );
+    });
   }
 
   if (written.length !== config.shots.length) {
@@ -292,4 +462,9 @@ async function main() {
   }
 }
 
-main().catch((err) => fail(err.stack || err.message));
+main().catch((err) => {
+  console.error(
+    `ERROR: ${err instanceof CaptureError ? err.message : err.stack || err.message}`
+  );
+  process.exit(1);
+});
