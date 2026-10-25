@@ -54,7 +54,12 @@ Then: push a `v*` tag &rarr; it builds &rarr; approve the release in GitHub &rar
 
 The release is uploaded as a draft and then published, so it works with
 GitHub's immutable releases setting (no file can be added to a published
-release).
+release). `release-tarball.yml` does the same.
+
+A test tag (any tag containing `-`, such as `v1.2.0-rc1`) is built and
+uploaded but left as a hidden draft, marked as a pre-release. A published
+release locks its tag for good; a draft can be deleted and its tag pushed
+again. Publish it by hand only if it should be public.
 
 Before the build step, the workflow also runs three CI sanity checks, in order:
 it lints the whole repo with `ruff` using an explicit rule set
