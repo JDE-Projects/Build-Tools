@@ -192,6 +192,9 @@ jobs:
           # this action publishes a prerelease before uploading its files.
           draft: true
       - name: Publish release
+        # rc/beta tags stay as hidden drafts: a published release locks its
+        # tag for good, while a draft can be deleted and its tag reused.
+        if: ${{ !contains(github.ref_name, '-') }}
         # gh needs the token and repository passed in: this job has no checkout,
         # and the token given to the step above does not carry over.
         env:
