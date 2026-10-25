@@ -8,6 +8,7 @@
 #  - pip (templates/dev): the ruff/pytest tooling pins the reusable workflows
 #    install for CI, and that tool repos copy as requirements-dev.txt so local
 #    checks match CI.
+#  - pip (screenshot): the Pillow pin that compose.py tells you to install from.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -27,5 +28,10 @@ updates:
 
   - package-ecosystem: pip
     directory: /templates/dev
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: /screenshot
     schedule:
       interval: weekly

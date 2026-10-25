@@ -14,11 +14,13 @@ Two small scripts:
 
 ## Requirements
 
-Nothing to install beyond what a dev machine already has:
-
 - Edge or Chrome (found automatically on Windows and Linux)
 - Node 22 or later (`fetch` and `WebSocket` are built in, so no npm packages)
-- Python with Pillow, for `compose.py` only
+- Python with Pillow, for `compose.py` only. Pillow is pinned in this folder's
+  `requirements.txt`, and no tool repo lists it. Install it into the Python
+  that runs the tool's generator, usually the tool's `.venv`:
+  `python -m pip install -r requirements.txt`. Without it, `compose.py` stops
+  and prints that command with full paths.
 
 ## Using it
 
