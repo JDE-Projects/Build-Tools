@@ -10,14 +10,24 @@ capture step produced something unexpected, and silently padding it would hide
 the problem in a file that ends up in a README.
 """
 
+import os
 import sys
 
-from PIL import Image
+REQUIREMENTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "requirements.txt")
 
 
 def fail(message: str) -> None:
     print(f"ERROR: {message}", file=sys.stderr)
     sys.exit(1)
+
+
+try:
+    from PIL import Image
+except ImportError:
+    fail("compose.py needs Pillow, which this Python does not have. "
+         "Install it with:\n"
+         f'  "{sys.executable}" -m pip install -r "{REQUIREMENTS}"')
 
 
 def main(argv: list) -> None:

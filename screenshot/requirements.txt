@@ -1,0 +1,4 @@
+# Pillow for compose.py, the only Python package the screenshot scripts need.
+# Installed on demand into whichever Python runs a tool's screenshot generator;
+# no tool repo lists it. Dependabot (see ../.github/dependabot.yml) bumps it.
+Pillow==13.0.0
