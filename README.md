@@ -54,7 +54,7 @@ Then: push a `v*` tag &rarr; it builds &rarr; approve the release in GitHub &rar
 
 The release is uploaded as a draft and then published, so it works with
 GitHub's immutable releases setting (no file can be added to a published
-release).
+release). `release-tarball.yml` does the same.
 
 A test tag (any tag containing `-`, such as `v1.2.0-rc1`) is built and
 uploaded but left as a hidden draft, marked as a pre-release. A published
