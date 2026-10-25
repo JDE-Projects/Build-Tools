@@ -34,6 +34,24 @@ def test_good_rc_tag_passes():
     assert result.returncode == 0, result.stderr
 
 
+def test_package_folder_reads_version_from_init():
+    result = run_script(str(FIXTURES / "good_package"), "v2.3.1")
+    assert result.returncode == 0, result.stderr
+
+
+def test_package_folder_version_mismatch_fails():
+    result = run_script(str(FIXTURES / "good_package"), "v2.3.2")
+    assert result.returncode != 0
+    assert "2.3.1" in result.stderr
+
+
+def test_package_folder_without_init_fails():
+    result = run_script(str(FIXTURES / "no_init_package"), "v1.0.0")
+    assert result.returncode != 0
+    assert "could not read entry script" in result.stderr
+    assert "__init__.py" in result.stderr
+
+
 def test_malformed_tags_fail():
     bad_tags = [
         "1.4.8",  # missing leading v

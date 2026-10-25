@@ -6,9 +6,10 @@ Usage:
     python verify_release_version.py <entry_script_path>
 
 The entry script path comes from the trusted workflow input (entry_script)
-and is passed as a CLI argument. The pushed tag is read from the
-GITHUB_REF_NAME environment variable, never interpolated into a shell
-command or into Python source, so a crafted tag cannot run as code.
+and is passed as a CLI argument. A package folder may be named instead of a
+file; APP_VERSION is then read from its __init__.py. The pushed tag is read
+from the GITHUB_REF_NAME environment variable, never interpolated into a
+shell command or into Python source, so a crafted tag cannot run as code.
 
 Reads APP_VERSION by parsing the entry script with the ast module only. The
 file is never imported or executed.
@@ -33,6 +34,8 @@ def fail(message: str) -> None:
 
 
 def find_app_version(entry_script: str) -> str:
+    if os.path.isdir(entry_script):
+        entry_script = os.path.join(entry_script, "__init__.py")
     try:
         with open(entry_script, "r", encoding="utf-8") as fh:
             source = fh.read()
