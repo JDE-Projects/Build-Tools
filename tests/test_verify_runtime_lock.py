@@ -84,7 +84,7 @@ def test_failure_hint_uses_default_universal_command():
     )
     assert result.returncode != 0
     assert (
-        "uv pip compile --universal --generate-hashes --python-version 3.10"
+        "uv pip compile --universal --generate-hashes --python-version 3.11"
         in result.stderr
     )
 
