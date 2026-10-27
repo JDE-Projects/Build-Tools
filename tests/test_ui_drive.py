@@ -776,6 +776,50 @@ def test_cleanup_refuses_when_teardown_not_verified(tmp_path, monkeypatch):
     assert run_dir.exists()
 
 
+def test_non_git_repo_leaves_a_run_folder_cleanup_removes(tmp_path, monkeypatch):
+    temp_root = tmp_path / "faketemp"
+    temp_root.mkdir()
+    monkeypatch.setattr(drive.tempfile, "gettempdir", lambda: str(temp_root))
+    not_a_repo = tmp_path / "plain_folder"
+    not_a_repo.mkdir()
+    monkeypatch.setattr(drive, "load_manifest", lambda path: {})
+    monkeypatch.setattr(drive, "validate_manifest", lambda *args: {"mutex": "Test_Mutex"})
+    monkeypatch.setattr(drive, "mutex_exists", lambda mutex: False)
+    monkeypatch.setattr(
+        drive,
+        "launch_suspended_in_job",
+        lambda *args: pytest.fail("nothing may launch when the copy fails"),
+    )
+
+    assert drive.main([str(not_a_repo), "smoke"]) == 2
+    (run_dir,) = list(temp_root.iterdir())
+    assert (run_dir / drive.TEARDOWN_MARKER_NAME).is_file()
+
+    assert drive.main(["cleanup", str(run_dir)]) == 0
+    assert not run_dir.exists()
+
+
+def test_lock_failure_writes_teardown_marker(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    run_dir = tmp_path / VALID_RUN_NAME
+    run_dir.mkdir()
+    markers = []
+
+    def fail_lock(path):
+        raise drive.SetupError("could not lock")
+
+    monkeypatch.setattr(drive, "load_manifest", lambda path: {})
+    monkeypatch.setattr(drive, "validate_manifest", lambda *args: {"mutex": "Test_Mutex"})
+    monkeypatch.setattr(drive, "mutex_exists", lambda mutex: False)
+    monkeypatch.setattr(drive, "create_run_dir", lambda: (run_dir, "run-pin"))
+    monkeypatch.setattr(drive, "_close_win_handle", lambda handle: None)
+    monkeypatch.setattr(drive, "acquire_run_lock", fail_lock)
+    monkeypatch.setattr(drive, "write_teardown_marker", lambda path: markers.append(path))
+
+    assert drive.main([str(repo), "smoke"]) == 2
+    assert markers == [run_dir]
+
+
 def test_cleanup_refuses_when_outside_temp_dir(tmp_path, monkeypatch):
     temp_root = tmp_path / "faketemp"
     temp_root.mkdir()

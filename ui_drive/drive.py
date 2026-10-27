@@ -383,6 +383,16 @@ def write_teardown_marker(run_dir: Path) -> None:
     write_exclusive_text(run_dir / TEARDOWN_MARKER_NAME, "")
 
 
+def _mark_unlaunched_run_torn_down(run_dir: Path) -> None:
+    """Writes the teardown marker for a run that failed before any process
+    was created, so `cleanup` can remove its folder. A failure to write it
+    is reported, not raised: the caller is already returning an error."""
+    try:
+        write_teardown_marker(run_dir)
+    except (OSError, SetupError) as exc:
+        print(f"ERROR: could not write {TEARDOWN_MARKER_NAME}; remove {run_dir} by hand: {exc}", file=sys.stderr)
+
+
 def base_child_env(base_env: dict, run_dir: Path) -> dict:
     """Environment additions common to the app and its fixture: no .pyc
     files left behind, and a private TEMP/TMP under the run folder so
@@ -1306,6 +1316,7 @@ def main(argv: list[str]) -> int:
             lock_fd = acquire_run_lock(run_dir)
         except SetupError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
+            _mark_unlaunched_run_torn_down(run_dir)
             return 2
 
         interpreter = sys.executable
@@ -1327,6 +1338,7 @@ def main(argv: list[str]) -> int:
                 copy_repo_to(repo, app_dir)
             except SetupError as exc:
                 print(f"ERROR: {exc}", file=sys.stderr)
+                _mark_unlaunched_run_torn_down(run_dir)
                 return 2
 
             try:
