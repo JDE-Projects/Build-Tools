@@ -40,6 +40,13 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: _buildtools
+      - name: Verify release is not already published
+        # First, so re-running a published tag stops here in seconds rather
+        # than failing at the upload after packing and the approval.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash _buildtools/scripts/checks/verify_release_unpublished.sh "${{ github.ref_name }}"
       - name: Verify release version
         # Runs right after checkout, before dependency install and packing,
         # so a bad tag stops the release before anything is built.
