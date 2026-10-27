@@ -17,8 +17,9 @@
 #   requirements_txt defaults to ./requirements.txt
 #
 # Optional environment settings choose what the lock is resolved for:
-#   RUNTIME_LOCK_PYTHON_VERSION  Python version to resolve for. Default 3.10,
-#                                the server tools' deployment target.
+#   RUNTIME_LOCK_PYTHON_VERSION  Python version to resolve for. Default 3.11,
+#                                the server tools' minimum. The workflows pass
+#                                their python_version input here.
 #   RUNTIME_LOCK_PLATFORM        uv target platform, for example
 #                                x86_64-pc-windows-msvc for the Windows desktop
 #                                tools. Unset or empty resolves --universal, a
@@ -30,7 +31,7 @@
 #   install command: pip install uv==0.12.17
 #   compile command (default settings):
 #     uv pip compile --universal --generate-hashes \
-#       --python-version 3.10 requirements.in -o <tempfile>
+#       --python-version 3.11 requirements.in -o <tempfile>
 #   compile command (Windows desktop tools on Python 3.14):
 #     uv pip compile --python-platform x86_64-pc-windows-msvc --generate-hashes \
 #       --python-version 3.14 requirements.in -o <tempfile>
@@ -49,7 +50,7 @@ set -uo pipefail
 REQUIREMENTS_IN="${1:-requirements.in}"
 REQUIREMENTS_TXT="${2:-requirements.txt}"
 UV_VERSION="0.12.17"
-PYTHON_VERSION="${RUNTIME_LOCK_PYTHON_VERSION:-3.10}"
+PYTHON_VERSION="${RUNTIME_LOCK_PYTHON_VERSION:-3.11}"
 if [ -n "${RUNTIME_LOCK_PLATFORM:-}" ]; then
   TARGET_ARGS=(--python-platform "$RUNTIME_LOCK_PLATFORM")
 else

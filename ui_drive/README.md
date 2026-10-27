@@ -76,7 +76,9 @@ tool sits between. The run folder holds:
   own canonical path
 - `.ui-drive.lock`, held exclusively by `drive.py` for the whole run
 - `.teardown-complete`, written only once the app's job has been closed and
-  cleanup (no leftover process, the debug port closed) has been verified
+  cleanup (no leftover process, the debug port closed) has been verified, or
+  when setup fails (taking the lock or copying the repo) before any process
+  is created
 
 ### The copy
 
