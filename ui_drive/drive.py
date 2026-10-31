@@ -16,6 +16,7 @@ does not cover. Windows only.
 from __future__ import annotations
 
 import ctypes
+import ipaddress
 import json
 import msvcrt
 import os
@@ -24,6 +25,7 @@ import re
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -451,41 +453,77 @@ def find_free_port(attempts: int = 50, rng: random.Random | None = None) -> int:
 
 
 # --------------------------------------------------------------------------
-# netstat parsing and listener verification (pure string processing, fully
+# TCP table decoding and listener verification (pure byte processing, fully
 # testable without a real listener)
 # --------------------------------------------------------------------------
 
-_NETSTAT_LINE = re.compile(
-    r"^\s*(?P<proto>TCP|TCPv6)\s+(?P<local>\S+)\s+(?P<remote>\S+)\s+(?P<state>\S+)\s+(?P<pid>\d+)\s*$"
-)
+AF_INET = socket.AF_INET
+AF_INET6 = socket.AF_INET6
+TCP_TABLE_OWNER_PID_ALL = 5
+ERROR_INSUFFICIENT_BUFFER = 122
 
 
-def parse_netstat_lines(output: str) -> list[dict]:
-    """Parses the table `netstat -ano` prints. Only TCP/TCPv6 rows with a
-    trailing PID are kept; header and blank lines are skipped silently."""
+class MIB_TCPROW_OWNER_PID(ctypes.Structure):
+    _fields_ = [
+        ("dwState", wintypes.DWORD),
+        ("dwLocalAddr", wintypes.DWORD),
+        ("dwLocalPort", wintypes.DWORD),
+        ("dwRemoteAddr", wintypes.DWORD),
+        ("dwRemotePort", wintypes.DWORD),
+        ("dwOwningPid", wintypes.DWORD),
+    ]
+
+
+class MIB_TCP6ROW_OWNER_PID(ctypes.Structure):
+    _fields_ = [
+        ("ucLocalAddr", ctypes.c_ubyte * 16),
+        ("dwLocalScopeId", wintypes.DWORD),
+        ("dwLocalPort", wintypes.DWORD),
+        ("ucRemoteAddr", ctypes.c_ubyte * 16),
+        ("dwRemoteScopeId", wintypes.DWORD),
+        ("dwRemotePort", wintypes.DWORD),
+        ("State", wintypes.DWORD),
+        ("dwOwningPid", wintypes.DWORD),
+    ]
+
+
+def _host_port(raw_port: int) -> int:
+    return socket.ntohs(raw_port & 0xFFFF)
+
+
+def decode_tcp_table(buffer: bytes, family: int) -> list[dict]:
+    """Decodes a GetExtendedTcpTable buffer for one address family."""
+    if len(buffer) < ctypes.sizeof(wintypes.DWORD):
+        raise ValueError("TCP table buffer is shorter than its row count")
+    (count,) = struct.unpack_from("<I", buffer)
+    row_type = MIB_TCPROW_OWNER_PID if family == AF_INET else MIB_TCP6ROW_OWNER_PID if family == AF_INET6 else None
+    if row_type is None:
+        raise ValueError(f"unsupported TCP address family: {family}")
+    row_size = ctypes.sizeof(row_type)
+    required_size = ctypes.sizeof(wintypes.DWORD) + count * row_size
+    if len(buffer) < required_size:
+        raise ValueError("TCP table buffer is shorter than its declared rows")
+
     rows = []
-    for line in output.splitlines():
-        m = _NETSTAT_LINE.match(line)
-        if not m:
-            continue
-        local = m.group("local")
-        if local.count(":") > 1:
-            # IPv6, e.g. [::1]:9333 or [::]:9333
-            addr, _, port_str = local.rpartition(":")
-            addr = addr.strip("[]")
+    for index in range(count):
+        row = row_type.from_buffer_copy(buffer, ctypes.sizeof(wintypes.DWORD) + index * row_size)
+        if family == AF_INET:
+            local_addr = str(ipaddress.IPv4Address(int(row.dwLocalAddr).to_bytes(4, "little")))
+            remote_addr = str(ipaddress.IPv4Address(int(row.dwRemoteAddr).to_bytes(4, "little")))
+            state = int(row.dwState)
         else:
-            addr, _, port_str = local.rpartition(":")
-        try:
-            port = int(port_str)
-        except ValueError:
-            continue
+            local_addr = str(ipaddress.IPv6Address(bytes(row.ucLocalAddr)))
+            remote_addr = str(ipaddress.IPv6Address(bytes(row.ucRemoteAddr)))
+            state = int(row.State)
         rows.append(
             {
-                "proto": m.group("proto"),
-                "local_addr": addr,
-                "local_port": port,
-                "state": m.group("state"),
-                "pid": int(m.group("pid")),
+                "family": family,
+                "local_addr": local_addr,
+                "local_port": _host_port(int(row.dwLocalPort)),
+                "remote_addr": remote_addr,
+                "remote_port": _host_port(int(row.dwRemotePort)),
+                "state": state,
+                "pid": int(row.dwOwningPid),
             }
         )
     return rows
@@ -494,12 +532,19 @@ def parse_netstat_lines(output: str) -> list[dict]:
 LOOPBACK_ADDRS = {"127.0.0.1"}
 
 
-def verify_listener(port: int, netstat_output: str, allowed_pids: set[int]) -> tuple[bool, str]:
-    """Checks that the only LISTENING entry on `port` is loopback-only
-    (127.0.0.1) and owned by one of allowed_pids. Any non-loopback address on
-    that port (0.0.0.0, ::, [::]) or a listener owned by an unknown PID fails
-    the check. Returns (ok, reason)."""
-    rows = [r for r in parse_netstat_lines(netstat_output) if r["local_port"] == port and r["state"] == "LISTENING"]
+def _listener_rows(port: int, rows: list[dict]) -> list[dict]:
+    return [
+        row
+        for row in rows
+        if row["local_port"] == port
+        and row["remote_port"] == 0
+        and row["remote_addr"] in {"0.0.0.0", "::"}
+    ]
+
+
+def verify_listener(port: int, rows: list[dict], allowed_pids: set[int]) -> tuple[bool, str]:
+    """Checks listener rows on port are IPv4 loopback-only and owned by this run."""
+    rows = _listener_rows(port, rows)
     if not rows:
         return False, f"nothing is listening on port {port} yet"
     for row in rows:
@@ -519,6 +564,17 @@ def verify_listener(port: int, netstat_output: str, allowed_pids: set[int]) -> t
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
 user32 = ctypes.WinDLL("user32", use_last_error=True)
+iphlpapi = ctypes.WinDLL("iphlpapi", use_last_error=True)
+
+iphlpapi.GetExtendedTcpTable.argtypes = [
+    wintypes.LPVOID,
+    ctypes.POINTER(wintypes.DWORD),
+    wintypes.BOOL,
+    wintypes.ULONG,
+    wintypes.ULONG,
+    wintypes.ULONG,
+]
+iphlpapi.GetExtendedTcpTable.restype = wintypes.DWORD
 
 ERROR_ALREADY_EXISTS = 183
 STILL_ACTIVE = 259
@@ -1155,14 +1211,24 @@ def capture_whole_window(hwnd: int, out_path: Path, run_dir: Path) -> bool:
     return True
 
 
-def run_netstat() -> str:
-    result = subprocess.run(
-        ["netstat", "-ano", "-p", "TCP"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    return result.stdout
+def _read_tcp_table(family: int) -> list[dict]:
+    # netstat can omit a real listener or report it as FIN_WAIT_1, so read Windows' TCP table directly.
+    size = wintypes.DWORD()
+    buffer = ctypes.create_string_buffer(0)
+    status = iphlpapi.GetExtendedTcpTable(None, ctypes.byref(size), False, family, TCP_TABLE_OWNER_PID_ALL, 0)
+    while status == ERROR_INSUFFICIENT_BUFFER:
+        buffer = ctypes.create_string_buffer(size.value)
+        status = iphlpapi.GetExtendedTcpTable(
+            buffer, ctypes.byref(size), False, family, TCP_TABLE_OWNER_PID_ALL, 0
+        )
+    if status != 0:
+        raise SetupError(f"GetExtendedTcpTable failed for address family {family}: {status}")
+    return decode_tcp_table(buffer.raw[:size.value], family)
+
+
+def read_tcp_rows() -> list[dict]:
+    """Returns all IPv4 and IPv6 TCP rows reported by Windows."""
+    return _read_tcp_table(AF_INET) + _read_tcp_table(AF_INET6)
 
 
 # --------------------------------------------------------------------------
@@ -1384,7 +1450,22 @@ def main(argv: list[str]) -> int:
                 env = base_child_env(os.environ, run_dir)
                 env["QTWEBENGINE_REMOTE_DEBUGGING"] = str(port)
 
-                pid, h_process = launch_suspended_in_job(job, [interpreter, str(entry_path)], app_dir, env)
+                stdout_log = run_dir / "app_stdout.log"
+                stderr_log = run_dir / "app_stderr.log"
+                out_fd, out_handle = open_inheritable_log_handle(stdout_log)
+                err_fd, err_handle = open_inheritable_log_handle(stderr_log)
+                try:
+                    pid, h_process = launch_suspended_in_job(
+                        job,
+                        [interpreter, str(entry_path)],
+                        app_dir,
+                        env,
+                        stdout_handle=out_handle,
+                        stderr_handle=err_handle,
+                    )
+                finally:
+                    os.close(out_fd)
+                    os.close(err_fd)
                 known_pids.add(pid)
                 entry_h_procs.append(h_process)
                 all_h_procs.append(h_process)
@@ -1396,15 +1477,17 @@ def main(argv: list[str]) -> int:
                 # member of the job", read fresh each time: get_job_pids(job),
                 # not a fixed set collected at launch.
                 def listener_ready():
-                    output = run_netstat()
-                    ok, _reason = verify_listener(port, output, get_job_pids(job))
-                    return output if ok else None
+                    rows = read_tcp_rows()
+                    ok, _reason = verify_listener(port, rows, get_job_pids(job))
+                    return rows if ok else None
 
-                netstat_output = _wait_for(listener_ready, LAUNCH_TIMEOUT_S)
-                if netstat_output is None:
-                    output = run_netstat()
-                    ok, reason = verify_listener(port, output, get_job_pids(job))
-                    raise SetupError(f"debug port never came up cleanly: {reason}")
+                listener_rows = _wait_for(listener_ready, LAUNCH_TIMEOUT_S)
+                if listener_rows is None:
+                    rows = read_tcp_rows()
+                    ok, reason = verify_listener(port, rows, get_job_pids(job))
+                    states = [row["state"] for row in _listener_rows(port, rows)]
+                    state_detail = ", ".join(map(str, states)) if states else "no row"
+                    raise SetupError(f"debug port never came up cleanly: {reason}; Windows states: {state_detail}")
 
                 target = _wait_for_page_target(port, plan["page_url_contains"], LAUNCH_TIMEOUT_S)
                 if target is None:
@@ -1519,10 +1602,8 @@ def _wait_for_page_target(port: int, page_url_contains: str | None, timeout_s: f
     return _wait_for(check, timeout_s)
 
 
-def port_is_listening(port: int, netstat_output: str) -> bool:
-    return any(
-        row["local_port"] == port and row["state"] == "LISTENING" for row in parse_netstat_lines(netstat_output)
-    )
+def port_is_listening(port: int, rows: list[dict]) -> bool:
+    return bool(_listener_rows(port, rows))
 
 
 def _survivors(pids: set[int], timeout_s: float) -> list[int]:
@@ -1562,8 +1643,7 @@ def _close_app_and_verify(
         kernel32.CloseHandle(job)  # KILL_ON_JOB_CLOSE: anything left in the job dies now
 
     survivors = _survivors(job_pids, SURVIVOR_TIMEOUT_S)
-    port_output = run_netstat()
-    still_listening = port_is_listening(port, port_output)
+    still_listening = port_is_listening(port, read_tcp_rows())
 
     cleanup_verified = not survivors and not still_listening
     ok = found_window and cleanup_verified
@@ -1621,7 +1701,7 @@ def _report_cleanup_after_error(job, port: int | None, known_pids: set[int], h_p
             [pid for pid in child_pids if not pid_is_gone(pid)]
             + [kernel32.GetProcessId(handle) for handle in h_procs if process_is_running(handle)]
         )
-        still_listening = port_is_listening(port, run_netstat()) if port is not None else False
+        still_listening = port_is_listening(port, read_tcp_rows()) if port is not None else False
     except KeyboardInterrupt:
         return None, False
     cleanup_verified = not survivors and not still_listening

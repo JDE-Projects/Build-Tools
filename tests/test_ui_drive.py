@@ -5,9 +5,12 @@ at import time), so these tests are skipped anywhere else.
 """
 
 import importlib.util
+import ipaddress
 import json
 import os
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -147,56 +150,118 @@ def test_load_manifest_reads_a_real_file(tmp_path):
 # Listener verification
 # --------------------------------------------------------------------------
 
-def netstat_line(local_addr: str, port: int, pid: int, state: str = "LISTENING") -> str:
-    return f"  TCP    {local_addr}:{port}         0.0.0.0:0              {state}       {pid}"
+def tcp_row(
+    local_addr: str = "127.0.0.1",
+    local_port: int = 9333,
+    remote_addr: str = "0.0.0.0",
+    remote_port: int = 0,
+    state: int = 2,
+    pid: int = 4242,
+    family: int = socket.AF_INET,
+) -> dict:
+    return {
+        "family": family,
+        "local_addr": local_addr,
+        "local_port": local_port,
+        "remote_addr": remote_addr,
+        "remote_port": remote_port,
+        "state": state,
+        "pid": pid,
+    }
 
 
 def test_verify_listener_accepts_loopback_owned_by_job(tmp_path):
-    output = netstat_line("127.0.0.1", 9333, 4242)
-    ok, reason = drive.verify_listener(9333, output, {4242})
+    ok, reason = drive.verify_listener(9333, [tcp_row()], {4242})
     assert ok, reason
 
 
 def test_verify_listener_rejects_all_interfaces(tmp_path):
-    output = netstat_line("0.0.0.0", 9333, 4242)
-    ok, reason = drive.verify_listener(9333, output, {4242})
+    ok, reason = drive.verify_listener(9333, [tcp_row(local_addr="0.0.0.0")], {4242})
     assert not ok
     assert "loopback" in reason
 
 
 def test_verify_listener_rejects_ipv6_any(tmp_path):
-    output = "  TCPv6  [::]:9333              [::]:0                 LISTENING       4242"
-    ok, reason = drive.verify_listener(9333, output, {4242})
+    ok, reason = drive.verify_listener(9333, [tcp_row(local_addr="::", remote_addr="::", family=socket.AF_INET6)], {4242})
     assert not ok
     assert "loopback" in reason
 
 
 def test_verify_listener_rejects_unknown_pid(tmp_path):
-    output = netstat_line("127.0.0.1", 9333, 9999)
-    ok, reason = drive.verify_listener(9333, output, {4242})
+    ok, reason = drive.verify_listener(9333, [tcp_row(pid=9999)], {4242})
     assert not ok
     assert "9999" in reason
 
 
 def test_verify_listener_rejects_nothing_listening(tmp_path):
-    output = netstat_line("127.0.0.1", 1234, 4242)
-    ok, reason = drive.verify_listener(9333, output, {4242})
+    ok, reason = drive.verify_listener(9333, [tcp_row(local_port=1234)], {4242})
     assert not ok
+    assert reason == "nothing is listening on port 9333 yet"
 
 
-def test_parse_netstat_lines_skips_header_and_blank_lines():
-    output = (
-        "\n"
-        "Active Connections\n"
-        "\n"
-        "  Proto  Local Address          Foreign Address        State           PID\n"
-        + netstat_line("127.0.0.1", 9333, 4242)
-        + "\n"
+def test_decode_tcp_table_ipv4():
+    def ipv4_dword(address):
+        return int.from_bytes(ipaddress.IPv4Address(address).packed, "little")
+
+    def packed_row(local, local_port, remote, remote_port, state, pid):
+        return struct.pack(
+            "<6I", state, ipv4_dword(local), socket.htons(local_port), ipv4_dword(remote), socket.htons(remote_port), pid
+        )
+
+    buffer = struct.pack("<I", 2) + packed_row("127.0.0.1", 9333, "0.0.0.0", 0, 2, 4242) + packed_row(
+        "127.0.0.1", 9333, "127.0.0.1", 50123, 5, 4243
     )
-    rows = drive.parse_netstat_lines(output)
+    rows = drive.decode_tcp_table(buffer, socket.AF_INET)
     assert rows == [
-        {"proto": "TCP", "local_addr": "127.0.0.1", "local_port": 9333, "state": "LISTENING", "pid": 4242}
+        tcp_row(),
+        tcp_row(remote_addr="127.0.0.1", remote_port=50123, state=5, pid=4243),
     ]
+
+
+def test_decode_tcp_table_ipv6():
+    def packed_row(local, remote, state, pid):
+        return struct.pack(
+            "<16sII16sIIII",
+            ipaddress.IPv6Address(local).packed,
+            0,
+            socket.htons(9333),
+            ipaddress.IPv6Address(remote).packed,
+            0,
+            0,
+            state,
+            pid,
+        )
+
+    rows = drive.decode_tcp_table(
+        struct.pack("<I", 2) + packed_row("::1", "::", 2, 4242) + packed_row("::", "::", 0, 4243), socket.AF_INET6
+    )
+    assert rows == [
+        tcp_row(local_addr="::1", remote_addr="::", family=socket.AF_INET6),
+        tcp_row(local_addr="::", remote_addr="::", state=0, pid=4243, family=socket.AF_INET6),
+    ]
+
+
+def test_verify_listener_accepts_state_zero_listener():
+    ok, reason = drive.verify_listener(9333, [tcp_row(state=0)], {4242})
+    assert ok, reason
+
+
+def test_verify_listener_ignores_connected_rows_on_port():
+    ok, reason = drive.verify_listener(9333, [tcp_row(remote_addr="127.0.0.1", remote_port=50123, state=5)], {4242})
+    assert not ok
+    assert reason == "nothing is listening on port 9333 yet"
+
+
+def test_verify_listener_rejects_ipv6_loopback():
+    ok, reason = drive.verify_listener(9333, [tcp_row(local_addr="::1", remote_addr="::", family=socket.AF_INET6)], {4242})
+    assert not ok
+    assert "loopback" in reason
+
+
+def test_port_is_listening_counts_state_zero_and_odd_states():
+    assert drive.port_is_listening(9333, [tcp_row(state=0)])
+    assert drive.port_is_listening(9333, [tcp_row(state=5)])
+    assert not drive.port_is_listening(9333, [])
 
 
 # --------------------------------------------------------------------------
@@ -450,6 +515,9 @@ class FakeKernel32:
     def GetProcessId(self, handle):
         return 101 if handle == "app-process" else 0
 
+    def SetHandleInformation(self, handle, mask, flags):
+        return True
+
 
 def prepare_main_teardown_test(tmp_path, monkeypatch, launch):
     repo = make_repo(tmp_path)
@@ -483,6 +551,54 @@ def prepare_main_teardown_test(tmp_path, monkeypatch, launch):
     return repo, kernel32, markers
 
 
+def test_main_redirects_app_stdout_and_stderr_to_run_logs(tmp_path, monkeypatch):
+    launches = []
+    opened_logs = {}
+    closed_fds = []
+
+    def launch(*args, **kwargs):
+        launches.append((args, kwargs))
+        return 101, "app-process"
+
+    repo, _kernel32, _markers = prepare_main_teardown_test(tmp_path, monkeypatch, launch)
+
+    def open_log(path):
+        fd = 10 + len(opened_logs)
+        handle = f"handle:{path.name}"
+        opened_logs[path.name] = (fd, handle)
+        return fd, handle
+
+    reader_calls = 0
+
+    def read_tcp_rows():
+        nonlocal reader_calls
+        reader_calls += 1
+        return [tcp_row(local_port=41000, pid=101)] if reader_calls == 1 else []
+
+    monkeypatch.setattr(drive, "open_inheritable_log_handle", open_log)
+    monkeypatch.setattr(drive.os, "close", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(drive, "get_job_pids", lambda job: {101})
+    monkeypatch.setattr(drive, "read_tcp_rows", read_tcp_rows)
+    monkeypatch.setattr(drive, "_wait_for_page_target", lambda *args: {"webSocketDebuggerUrl": "ws://test"})
+    monkeypatch.setattr(drive, "collect_scenario_results", lambda *args: {"checks": [{"pass": True}], "error": None})
+    monkeypatch.setattr(drive, "find_window_for_pids", lambda *args: 1)
+    monkeypatch.setattr(drive, "capture_whole_window", lambda *args: True)
+    monkeypatch.setattr(drive, "close_window", lambda hwnd: None)
+    monkeypatch.setattr(drive, "process_is_running", lambda handle: False)
+    monkeypatch.setattr(drive, "pid_is_gone", lambda pid: True)
+    monkeypatch.setattr(
+        drive.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {"stdout": "", "stderr": "", "returncode": 0})(),
+    )
+
+    assert drive.main([str(repo), "smoke"]) == 0
+    _args, kwargs = launches[0]
+    assert kwargs["stdout_handle"] == opened_logs["app_stdout.log"][1]
+    assert kwargs["stderr_handle"] == opened_logs["app_stderr.log"][1]
+    assert closed_fds[:2] == [opened_logs["app_stdout.log"][0], opened_logs["app_stderr.log"][0]]
+
+
 def test_main_refuses_when_mutex_is_held_without_creating_a_run(monkeypatch, tmp_path):
     repo = make_repo(tmp_path)
     monkeypatch.setattr(drive, "mutex_exists", lambda mutex: True)
@@ -505,7 +621,7 @@ def test_main_exception_after_job_writes_marker_when_cleanup_is_verified(tmp_pat
     repo, kernel32, markers = prepare_main_teardown_test(tmp_path, monkeypatch, fail_launch)
     monkeypatch.setattr(drive, "get_job_pids", lambda job: {101})
     monkeypatch.setattr(drive, "pid_is_gone", lambda pid: True)
-    monkeypatch.setattr(drive, "run_netstat", lambda: "")
+    monkeypatch.setattr(drive, "read_tcp_rows", lambda: [])
 
     assert drive.main([str(repo), "smoke"]) == 2
     assert kernel32.closed.count("job") == 1
@@ -519,7 +635,7 @@ def test_main_exception_after_job_skips_marker_when_a_survivor_remains(tmp_path,
     repo, kernel32, markers = prepare_main_teardown_test(tmp_path, monkeypatch, fail_launch)
     monkeypatch.setattr(drive, "get_job_pids", lambda job: {101})
     monkeypatch.setattr(drive, "pid_is_gone", lambda pid: False)
-    monkeypatch.setattr(drive, "run_netstat", lambda: "")
+    monkeypatch.setattr(drive, "read_tcp_rows", lambda: [])
 
     assert drive.main([str(repo), "smoke"]) == 2
     assert kernel32.closed.count("job") == 1
@@ -533,14 +649,14 @@ def test_main_keyboard_interrupt_after_job_writes_marker_when_cleanup_is_verifie
     repo, kernel32, markers = prepare_main_teardown_test(tmp_path, monkeypatch, interrupt_launch)
     monkeypatch.setattr(drive, "get_job_pids", lambda job: {101})
     monkeypatch.setattr(drive, "pid_is_gone", lambda pid: True)
-    monkeypatch.setattr(drive, "run_netstat", lambda: "")
+    monkeypatch.setattr(drive, "read_tcp_rows", lambda: [])
 
     assert drive.main([str(repo), "smoke"]) == 2
     assert kernel32.closed.count("job") == 1
     assert markers
 
 
-@pytest.mark.parametrize("interrupt_at", ["window lookup", "survivor wait", "netstat call"])
+@pytest.mark.parametrize("interrupt_at", ["window lookup", "survivor wait", "TCP table call"])
 def test_main_keyboard_interrupt_in_close_verifies_known_processes(tmp_path, monkeypatch, interrupt_at):
     repo, kernel32, markers = prepare_main_teardown_test(
         tmp_path, monkeypatch, lambda *args, **kwargs: (101, "app-process")
@@ -565,7 +681,7 @@ def test_main_keyboard_interrupt_in_close_verifies_known_processes(tmp_path, mon
             return value
 
         monkeypatch.setattr(drive, "find_window_for_pids", find_window)
-        monkeypatch.setattr(drive, "run_netstat", lambda: "")
+        monkeypatch.setattr(drive, "read_tcp_rows", lambda: [])
     elif interrupt_at == "survivor wait":
         monkeypatch.setattr(drive, "find_window_for_pids", lambda *args: 1)
         waits = 0
@@ -578,19 +694,19 @@ def test_main_keyboard_interrupt_in_close_verifies_known_processes(tmp_path, mon
             return predicate()
 
         monkeypatch.setattr(drive, "_wait_for", wait_for)
-        monkeypatch.setattr(drive, "run_netstat", lambda: "")
+        monkeypatch.setattr(drive, "read_tcp_rows", lambda: [])
     else:
         monkeypatch.setattr(drive, "find_window_for_pids", lambda *args: 1)
-        netstat_calls = 0
+        reader_calls = 0
 
-        def run_netstat():
-            nonlocal netstat_calls
-            netstat_calls += 1
-            if netstat_calls == 2:
+        def read_tcp_rows():
+            nonlocal reader_calls
+            reader_calls += 1
+            if reader_calls == 2:
                 raise KeyboardInterrupt
-            return ""
+            return []
 
-        monkeypatch.setattr(drive, "run_netstat", run_netstat)
+        monkeypatch.setattr(drive, "read_tcp_rows", read_tcp_rows)
 
     assert drive.main([str(repo), "smoke"]) == 2
     assert kernel32.closed.count("job") == 1

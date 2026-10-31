@@ -70,8 +70,9 @@ tool sits between. The run folder holds:
   user's real one
 - `results.json`, the scenario's checks in machine-readable form
 - any screenshots the scenario or the window capture step took
-- on any failure, the app's own stdout/stderr and the Node log, so a broken
-  run can be diagnosed without repeating it
+- `app_stdout.log` and `app_stderr.log`, written on every run, plus `node.log`
+  when the Node scenario runner is reached, so a broken run can be diagnosed
+  without repeating it
 - `.ui-drive-run`, a marker written at creation holding the run's ID and its
   own canonical path
 - `.ui-drive.lock`, held exclusively by `drive.py` for the whole run
