@@ -4,7 +4,7 @@
 // A scenario file's default export is an async function that receives the
 // helpers object.
 
-export default async function smoke({ click, type, keys, press, evaluate, waitFor, check, screenshot, fixture }) {
+export default async function smoke({ click, type, keys, keysFocused, press, evaluate, waitFor, check, screenshot, fixture }) {
   // fixture: the JSON the fixture printed before the app launched.
   check(
     "fixture JSON reached the scenario",
@@ -50,6 +50,18 @@ export default async function smoke({ click, type, keys, press, evaluate, waitFo
   await keys("#nameBox", "Bell");
   const nameAfterKeys = await evaluate("document.getElementById('nameBox').value");
   check("keys() sends real per-character key events", nameAfterKeys === "Bell", `got ${nameAfterKeys}`);
+
+  // keysFocused(): keeps typing where the caret is, with no click to move
+  // it. Home puts the caret at the start, End back at the end.
+  await press("Home");
+  await keysFocused("A ");
+  await press("End");
+  await keysFocused("e");
+  const nameAfterFocused = await evaluate(
+    "JSON.stringify([document.getElementById('nameBox').value, document.getElementById('nameBox').selectionStart])"
+  );
+  check("keysFocused() types at the caret, and Home and End move it",
+    nameAfterFocused === JSON.stringify(["A Belle", 7]), `got ${nameAfterFocused}`);
 
   // type() on a native date input: Input.insertText can't reach a
   // segmented control's sub-fields, so type() falls back to real
