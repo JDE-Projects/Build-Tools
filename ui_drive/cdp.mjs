@@ -140,6 +140,7 @@ const KEY_TABLE = {
   ArrowUp: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
   ArrowDown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
   Home: { key: "Home", code: "Home", windowsVirtualKeyCode: 36 },
+  End: { key: "End", code: "End", windowsVirtualKeyCode: 35 },
 };
 
 // CDP Input.dispatchKeyEvent modifier bits (Alt/Ctrl/Meta/Shift).
@@ -321,6 +322,15 @@ class Runner {
     await this._typeChars(text);
   }
 
+  // Sends text as real per-character key events to whatever already has
+  // focus, without clicking first. keys() clicks the element's centre each
+  // time, which moves the caret to wherever that click lands; use this to
+  // keep typing where the caret already is, for example to check the caret
+  // after each word.
+  async keysFocused(text) {
+    await this._typeChars(text);
+  }
+
   async press(key) {
     const spec = KEY_TABLE[key];
     if (!spec) throw new Error(`press(): unknown key ${key}. Add it to KEY_TABLE in cdp.mjs.`);
@@ -387,6 +397,7 @@ async function main() {
       click: (s) => runner.click(s),
       type: (s, t) => runner.type(s, t),
       keys: (s, t) => runner.keys(s, t),
+      keysFocused: (t) => runner.keysFocused(t),
       press: (k) => runner.press(k),
       evaluate: (js) => runner.evaluate(js),
       waitFor: (js, t) => runner.waitFor(js, t),
