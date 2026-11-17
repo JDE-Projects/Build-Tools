@@ -14,4 +14,4 @@ pyinstaller==6.22.3
 # list bundled with Python, so antivirus and network filters that inspect HTTPS
 # do not break the GitHub update check. Needs --hidden-import truststore in the
 # build (see sxt-build-ship).
-truststore==0.10.4
+truststore==0.10.5
