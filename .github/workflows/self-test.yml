@@ -1,0 +1,58 @@
+name: Self test
+
+# Runs Build-Tools' own tests (tests/) on every pull request and push to main,
+# so a broken check script or workflow helper fails here instead of in the
+# first app that picks up the new Build-Tools version. The protect-main ruleset
+# requires both jobs to pass, by the job names below.
+#
+# Each job matches where its half of the fleet runs these scripts. Windows on
+# 3.14.10 is ci-windows.yml's and release.yml's default and covers the
+# Windows-only ui_drive and license notices tests. Ubuntu on 3.11 is ci.yml's
+# and release-tarball.yml's default (the Raspberry Pi tools) and ships
+# ShellCheck, which the run_shellcheck tests need.
+#
+# No path filter: a required check that never starts leaves a pull request
+# unmergeable. This is not a reusable workflow. App repos call ci.yml or
+# ci-windows.yml.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows
+            os: windows-latest
+            python: '3.14.10'  # keep equal to ci-windows.yml's and release.yml's default
+          - label: ubuntu
+            os: ubuntu-latest
+            python: '3.11'     # keep equal to ci.yml's and release-tarball.yml's default
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '${{ matrix.python }}' }
+      - name: Require ShellCheck
+        # The run_shellcheck tests skip without it, which would let this job
+        # pass with them unrun.
+        if: ${{ matrix.label == 'ubuntu' }}
+        shell: bash
+        run: shellcheck --version
+      - name: Install test tooling
+        shell: bash
+        run: |
+          python --version
+          python -m pip --version
+          python -m pip install -r templates/dev/requirements.txt
+      - name: Run tests
+        shell: bash
+        run: python -m pytest tests -q -rs
