@@ -44,7 +44,7 @@ Then: push a `v*` tag &rarr; it builds &rarr; approve the release in GitHub &rar
 | Input | Required | Default | Notes |
 |---|---|---|---|
 | `app_name` | yes | (none) | Used for the zip name and default dist folder |
-| `python_version` | no | `3.14` | Match the app's pinned Python |
+| `python_version` | no | `3.14.10` | Exact Python patch version, pinned so Python changes only in a reviewed commit. Keep equal to the default in `ci-windows.yml`. The app's `THIRD-PARTY-LICENSES.txt` must name the versions this Python bundles |
 | `dist_subfolder` | no | `app_name` | PyInstaller `--onedir` output folder under `dist\` |
 | `build_command` | no | `Build.bat` | The app's build script (runs in `cmd`) |
 | `build_installer` | no | `true` | Also build a Windows installer (`<app_name>-<tag>-setup.exe`) via Inno Setup |
@@ -70,6 +70,17 @@ it lints the whole repo with `ruff` using an explicit rule set
 versions come from `templates/dev/requirements.txt`, which the workflows install
 and which Dependabot keeps current; tool repos copy it as `requirements-dev.txt`
 so local checks match CI.
+
+The workflow also runs `scripts/checks/verify_notices.py` on the repo's
+`THIRD-PARTY-LICENSES.txt` (skipped when the file is absent). It reads the
+versions of CPython, OpenSSL, SQLite, expat and mpdecimal from the Python the
+build runs on, and fails if any line starting with one of those names and a
+version number names a different version, or if a component has no such line.
+All mismatches are reported in one run. After the build, the same script runs
+with `--dist` on the built app folder: every `.dll` or `.pyd` that also exists
+in the interpreter's `DLLs` folder, plus the interpreter's `python3*.dll`, must
+be byte-identical (SHA-256) to the interpreter's copy, and the `python3*.dll`
+must be present. `ci-windows.yml` runs the notices check without `--dist`.
 
 ## Verifying a download
 

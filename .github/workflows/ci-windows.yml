@@ -16,7 +16,7 @@ name: CI Windows (reusable)
 on:
   workflow_call:
     inputs:
-      python_version: { type: string, default: '3.14' }  # match release.yml's default
+      python_version: { type: string, default: '3.14.10' }  # keep equal to release.yml's default; the exact patch is pinned so Python changes only in a reviewed commit
       entry_script:   { type: string, default: '' }      # tool's main .py (e.g. simple_ssh_tool.py); enables the import check when set
       verify_runtime_lock: { type: boolean, default: false } # require requirements.txt to match requirements.in (uv-compiled for Windows and python_version, committed versions kept, hashes re-fetched), and install it with --require-hashes
 
@@ -61,6 +61,11 @@ jobs:
           }
           python -m pip install -r _buildtools/templates/dev/requirements.txt
           if ($LASTEXITCODE -ne 0) { throw "Installing the dev tooling failed" }
+      - name: Verify license notices
+        shell: pwsh
+        run: |
+          python _buildtools/scripts/checks/verify_notices.py
+          if ($LASTEXITCODE -ne 0) { throw "License notices check failed" }
       - name: Verify runtime lock
         if: ${{ inputs.verify_runtime_lock }}
         shell: bash
