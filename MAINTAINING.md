@@ -38,6 +38,14 @@ Signing facts worth not re-researching:
    source-only packages, is pinned by version in `build-constraints.txt` but not
    hash-checked.
 
+## Build-Tools' own tests
+
+`.github/workflows/self-test.yml` runs `pytest tests` on Windows (Python 3.14.10)
+and ubuntu (Python 3.11) for every pull request and push to main, and the
+`protect-main` ruleset requires both jobs, `tests (windows)` and
+`tests (ubuntu)`, to pass. Changes to main therefore go through a pull request. Run
+`python -m pytest tests -q` locally before opening one.
+
 ## Dependabot PR review protocol
 
 Never auto-merge, never rubber-stamp. For each PR:

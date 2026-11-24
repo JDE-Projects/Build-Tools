@@ -8,7 +8,8 @@ environment, installs the pinned uv version into it, and every test runs the
 script with that environment's script directory placed first on PATH so
 `python` and `uv` both resolve there. If the venv or the uv install cannot be
 created (for example when offline), the whole module is skipped rather than
-failed.
+failed on a local run. On GitHub Actions the same setup problem fails the
+module, so the required check cannot pass with these tests unrun.
 """
 
 import os
@@ -43,19 +44,29 @@ def _scripts_dir(venv_dir: Path) -> Path:
     return venv_dir / "bin"
 
 
+def _setup_failed(reason: str) -> None:
+    """Skip on a local run (offline, no venv support), but fail on GitHub
+    Actions, where a skipped module would let the required check pass without
+    these tests ever running."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
 @pytest.fixture(scope="module")
 def uv_env(tmp_path_factory):
-    """Build a throwaway venv with uv 0.12.17 installed, or skip the module."""
+    """Build a throwaway venv with uv 0.12.17 installed, or skip the module
+    (fail on GitHub Actions)."""
     venv_dir = tmp_path_factory.mktemp("verify_runtime_lock_uv_venv")
     try:
         venv.create(venv_dir, with_pip=True)
     except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"could not create a venv for uv tests: {exc}")
+        _setup_failed(f"could not create a venv for uv tests: {exc}")
 
     scripts_dir = _scripts_dir(venv_dir)
     python = scripts_dir / ("python.exe" if sys.platform == "win32" else "python")
     if not python.exists():
-        pytest.skip(f"venv python not found at {python}")
+        _setup_failed(f"venv python not found at {python}")
 
     install = subprocess.run(
         [str(python), "-m", "pip", "install", f"uv=={UV_VERSION}"],
@@ -64,7 +75,7 @@ def uv_env(tmp_path_factory):
         timeout=300,
     )
     if install.returncode != 0:
-        pytest.skip(
+        _setup_failed(
             f"could not install uv=={UV_VERSION} (offline?): {install.stderr.strip()}"
         )
 
