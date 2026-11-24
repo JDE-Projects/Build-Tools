@@ -9,7 +9,7 @@ on:
   workflow_call:
     inputs:
       app_name:        { type: string, required: true }   # e.g. SimpleProjectManager
-      python_version:  { type: string, default: '3.14' }
+      python_version:  { type: string, default: '3.14.10' }  # keep equal to ci-windows.yml's default; the exact patch is pinned so Python changes only in a reviewed commit
       dist_subfolder:  { type: string, default: '' }       # blank = same as app_name
       build_command:   { type: string, default: 'Build.bat' }
       build_installer: { type: boolean, default: true }    # also build an Inno Setup installer

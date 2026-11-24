@@ -44,7 +44,7 @@ Then: push a `v*` tag &rarr; it builds &rarr; approve the release in GitHub &rar
 | Input | Required | Default | Notes |
 |---|---|---|---|
 | `app_name` | yes | (none) | Used for the zip name and default dist folder |
-| `python_version` | no | `3.14` | Match the app's pinned Python |
+| `python_version` | no | `3.14.10` | Exact Python patch version, pinned so Python changes only in a reviewed commit. Keep equal to the default in `ci-windows.yml`. The app's `THIRD-PARTY-LICENSES.txt` must name the versions this Python bundles |
 | `dist_subfolder` | no | `app_name` | PyInstaller `--onedir` output folder under `dist\` |
 | `build_command` | no | `Build.bat` | The app's build script (runs in `cmd`) |
 | `build_installer` | no | `true` | Also build a Windows installer (`<app_name>-<tag>-setup.exe`) via Inno Setup |
