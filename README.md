@@ -71,6 +71,17 @@ versions come from `templates/dev/requirements.txt`, which the workflows install
 and which Dependabot keeps current; tool repos copy it as `requirements-dev.txt`
 so local checks match CI.
 
+The workflow also runs `scripts/checks/verify_notices.py` on the repo's
+`THIRD-PARTY-LICENSES.txt` (skipped when the file is absent). It reads the
+versions of CPython, OpenSSL, SQLite, expat and mpdecimal from the Python the
+build runs on, and fails if any line starting with one of those names and a
+version number names a different version, or if a component has no such line.
+All mismatches are reported in one run. After the build, the same script runs
+with `--dist` on the built app folder: every `.dll` or `.pyd` that also exists
+in the interpreter's `DLLs` folder, plus the interpreter's `python3*.dll`, must
+be byte-identical (SHA-256) to the interpreter's copy, and the `python3*.dll`
+must be present. `ci-windows.yml` runs the notices check without `--dist`.
+
 ## Verifying a download
 
 The build is signed by the **reusable workflow in this repo**, so the verify

@@ -61,6 +61,11 @@ jobs:
           }
           python -m pip install -r _buildtools/templates/dev/requirements.txt
           if ($LASTEXITCODE -ne 0) { throw "Installing the dev tooling failed" }
+      - name: Verify license notices
+        shell: pwsh
+        run: |
+          python _buildtools/scripts/checks/verify_notices.py
+          if ($LASTEXITCODE -ne 0) { throw "License notices check failed" }
       - name: Verify runtime lock
         if: ${{ inputs.verify_runtime_lock }}
         shell: bash
