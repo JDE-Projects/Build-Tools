@@ -139,6 +139,8 @@ const KEY_TABLE = {
   Backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
   ArrowUp: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
   ArrowDown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
+  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 },
+  ArrowRight: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
   Home: { key: "Home", code: "Home", windowsVirtualKeyCode: 36 },
   End: { key: "End", code: "End", windowsVirtualKeyCode: 35 },
 };
