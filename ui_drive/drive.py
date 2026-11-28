@@ -1606,6 +1606,13 @@ def port_is_listening(port: int, rows: list[dict]) -> bool:
     return bool(_listener_rows(port, rows))
 
 
+def port_still_listening_after(port: int, timeout_s: float) -> bool:
+    """Waits up to timeout_s for the port to stop listening. A listener owned by a
+    process the job just killed can outlive the process briefly, so a single read
+    right after the kill can report a port that closes a moment later."""
+    return _wait_for(lambda: not port_is_listening(port, read_tcp_rows()), timeout_s) is None
+
+
 def _survivors(pids: set[int], timeout_s: float) -> list[int]:
     """Waits up to timeout_s for every pid to be gone, then returns whichever
     ones are still alive (empty means cleanup is fully verified)."""
@@ -1643,7 +1650,7 @@ def _close_app_and_verify(
         kernel32.CloseHandle(job)  # KILL_ON_JOB_CLOSE: anything left in the job dies now
 
     survivors = _survivors(job_pids, SURVIVOR_TIMEOUT_S)
-    still_listening = port_is_listening(port, read_tcp_rows())
+    still_listening = port_still_listening_after(port, SURVIVOR_TIMEOUT_S)
 
     cleanup_verified = not survivors and not still_listening
     ok = found_window and cleanup_verified
@@ -1701,7 +1708,7 @@ def _report_cleanup_after_error(job, port: int | None, known_pids: set[int], h_p
             [pid for pid in child_pids if not pid_is_gone(pid)]
             + [kernel32.GetProcessId(handle) for handle in h_procs if process_is_running(handle)]
         )
-        still_listening = port_is_listening(port, read_tcp_rows()) if port is not None else False
+        still_listening = port_still_listening_after(port, SURVIVOR_TIMEOUT_S) if port is not None else False
     except KeyboardInterrupt:
         return None, False
     cleanup_verified = not survivors and not still_listening

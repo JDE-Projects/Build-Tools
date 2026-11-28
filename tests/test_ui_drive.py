@@ -264,6 +264,17 @@ def test_port_is_listening_counts_state_zero_and_odd_states():
     assert not drive.port_is_listening(9333, [])
 
 
+def test_port_still_listening_after_waits_for_a_late_close(monkeypatch):
+    reads = iter([[tcp_row(state=2)], [tcp_row(state=2)], []])
+    monkeypatch.setattr(drive, "read_tcp_rows", lambda: next(reads, []))
+    assert drive.port_still_listening_after(9333, 5) is False
+
+
+def test_port_still_listening_after_reports_a_port_that_stays_open(monkeypatch):
+    monkeypatch.setattr(drive, "read_tcp_rows", lambda: [tcp_row(state=2)])
+    assert drive.port_still_listening_after(9333, 0.3) is True
+
+
 # --------------------------------------------------------------------------
 # Free port selection
 # --------------------------------------------------------------------------
